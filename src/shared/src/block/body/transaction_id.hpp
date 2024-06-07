@@ -3,12 +3,12 @@
 #include "block/body/nonce.hpp"
 #include "block/chain/height.hpp"
 #include "general/compact_uint.hpp"
-#include "general/reader.hpp"
 #include "general/view.hpp"
 #include <array>
 #include <cstdint>
 class Height;
 class PinHeight;
+class Reader;
 
 struct TransactionId {
     TransactionId(AccountId accountId, PinHeight pinHeight, NonceId nonceId)
@@ -16,6 +16,7 @@ struct TransactionId {
         , pinHeight(pinHeight)
         , nonceId(nonceId) {};
     constexpr static size_t bytesize = 16;
+    static consteval size_t byte_size(){return bytesize;}
 
     TransactionId(Reader& r);
     friend Writer& operator<<(Writer&, const TransactionId&);
@@ -30,4 +31,14 @@ struct TransactionId {
 struct TxidWithFee {
     TransactionId txid;
     CompactUInt fee;
+
+    TxidWithFee(TransactionId txid, CompactUInt fee)
+        : txid(std::move(txid))
+        , fee(std::move(fee))
+    {
+    }
+    static consteval size_t byte_size(){return decltype(txid)::byte_size() + decltype(fee)::byte_size();}
+    friend Writer& operator<<(Writer&, const TxidWithFee&);
+
+    TxidWithFee(Reader& r);
 };

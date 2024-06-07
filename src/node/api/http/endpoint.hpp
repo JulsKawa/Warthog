@@ -1,15 +1,16 @@
 #pragma once
+#ifndef DISABLE_LIBUV
 #define UWS_NO_ZLIB
 #include "api/types/all.hpp"
 #include "block/block.hpp"
-#include "general/tcp_util.hpp"
+#include "transport/helpers/tcp_sockaddr.hpp"
 #include "uwebsockets/App.h"
 #include <thread>
 #include <variant>
 
 using WebsocketEvent = std::variant<API::Rollback,API::Block>;
 
-struct Config;
+struct ConfigParams;
 class IndexGenerator {
 public:
     void get(std::string s);
@@ -24,12 +25,17 @@ private:
 
 class HTTPEndpoint {
 public:
-    static std::optional<HTTPEndpoint> make_public_endpoint(const Config&);
-    HTTPEndpoint(EndpointAddress bind, bool isPublic = false);
+    static std::optional<HTTPEndpoint> make_public_endpoint(const ConfigParams&);
+    HTTPEndpoint(TCPSockaddr bind, bool isPublic = false);
+    void start(){
+        assert(!worker.joinable());
+        worker = std::thread(&HTTPEndpoint::work, this);
+    }
     ~HTTPEndpoint()
     {
         lc.loop->defer(std::bind(&HTTPEndpoint::shutdown, this));
-        t.join();
+        if (worker.joinable()) 
+            worker.join();
     }
     void push_event(WebsocketEvent e)
     {
@@ -69,11 +75,12 @@ private:
     // variables
     IndexGenerator indexGenerator;
     std::set<uWS::HttpResponse<false>*> pendingRequests;
-    EndpointAddress bind;
+    TCPSockaddr bind;
     bool isPublic;
     us_listen_socket_t* listen_socket = nullptr;
     const uWS::LoopCleaner lc;
     uWS::App app;
     bool bshutdown = false;
-    std::thread t;
+    std::thread worker;
 };
+#endif

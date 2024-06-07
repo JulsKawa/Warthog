@@ -1,7 +1,9 @@
 #pragma once
 #include "general/funds.hpp"
+#include <cassert>
 #include <cstdint>
 class Writer;
+class Reader;
 Writer& operator<<(Writer&, CompactUInt);
 class CompactUInt {
 public:
@@ -9,8 +11,10 @@ public:
         : val(val)
     {
     }
+    CompactUInt(Reader& r);
     auto to_string() const { return Funds(*this).to_string(); }
     static CompactUInt compact(Funds);
+    static consteval size_t byte_size(){return sizeof(val);}
     operator Funds() const
     {
         return uncompact();

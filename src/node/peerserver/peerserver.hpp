@@ -1,92 +1,94 @@
 #pragma once
 
-#include "general/page.hpp"
 #include "ban_cache.hpp"
 #include "db/peer_db.hpp"
+#include "eventloop/address_manager/connection_schedule.hpp"
 #include "expected.hpp"
 #include "general/errors.hpp"
-#include "general/tcp_util.hpp"
+#include "general/page.hpp"
 #include "spdlog/spdlog.h"
+#include "transport/connection_base.hpp"
+#include <bitset>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <queue>
+#include <set>
 #include <thread>
-#include <uv.h>
 #include <variant>
 
-class Connection;
-class Conman;
 struct Inspector;
-struct Config;
+struct ConfigParams;
 
 class PeerServer {
 public:
-    struct Offense {
-        IPv4 ip;
+    struct OnClose {
+        std::shared_ptr<peerserver::ConnectionData> con;
         int32_t offense;
-        int64_t rowid;
     };
-    using BannedCB = std::function<void(const std::vector<PeerDB::BanEntry>&)>;
-    using OffensesCb = std::function<void(const tl::expected<std::vector<OffenseEntry>, int32_t>&)>;
-    using ResultCB = std::function<void(const tl::expected<void, int32_t>&)>;
+    using banned_callback_t = std::function<void(const std::vector<PeerDB::BanEntry>&)>;
+    using offenses_callback_t = std::function<void(const tl::expected<std::vector<OffenseEntry>, int32_t>&)>;
+    using result_callback_t = std::function<void(const tl::expected<void, int32_t>&)>;
 
 private:
     friend struct Inspector;
-    struct NewConnection {
-        Conman& cm;
-        std::weak_ptr<Connection> c;
+    struct Authenticate {
+        std::shared_ptr<IPv4Connection> c;
     };
     struct Unban {
-        ResultCB cb;
+        result_callback_t cb;
     };
 
     struct GetOffenses {
         Page page;
-        OffensesCb cb;
+        offenses_callback_t cb;
     };
 
 public:
-    bool async_register_close(IPv4 ip, int32_t offense, int64_t rowid = -1)
+    bool async_register_close(std::shared_ptr<peerserver::ConnectionData> con, int32_t offense)
     {
+        // TODO:
+        // global().core->async_report_failed_outbound(peerAddress);
         if (offense == EREFUSED)
             return false;
-        return async_event(Offense { ip, offense, rowid });
+        return async_event(OnClose { std::move(con), offense });
     }
-    void async_shutdown()
+    void shutdown()
     {
         std::unique_lock<std::mutex> l(mutex);
-        shutdown = true;
+        _shutdown = true;
         hasWork = true;
         cv.notify_one();
     }
-    bool async_validate(Conman& cm, std::shared_ptr<Connection> c)
+    void wait_for_shutdown();
+
+    bool authenticate(std::shared_ptr<IPv4Connection> c)
     {
-        // make sure that addref is called before
-        return async_event(NewConnection { cm, std::move(c) });
+        return async_event(Authenticate { std::move(c) });
     }
-    bool async_get_banned(BannedCB cb)
+
+    bool async_get_banned(banned_callback_t cb)
     {
         return async_event(cb);
     };
-    bool async_unban(ResultCB cb)
+    bool async_unban(result_callback_t cb)
     {
         return async_event(Unban { std::move(cb) });
     }
-    bool async_get_offenses(Page page, OffensesCb cb)
+    bool async_get_offenses(Page page, offenses_callback_t cb)
     {
         return async_event(GetOffenses { page, std::move(cb) });
     }
-    bool async_register_peer(EndpointAddress a)
+    bool async_register_peer(TCPSockaddr a)
     {
         return async_event(RegisterPeer { a });
     }
-    bool async_seen_peer(EndpointAddress a)
+    bool async_seen_peer(TCPSockaddr a)
     {
         return async_event(SeenPeer { a });
     }
     bool async_get_recent_peers(
-        std::function<void(std::vector<std::pair<EndpointAddress, uint32_t>>&&)>&& cb,
+        std::function<void(std::vector<std::pair<TCPSockaddr, uint32_t>>&&)>&& cb,
         size_t maxEntries = 100)
     {
         return async_event(GetRecentPeers { std::move(cb), maxEntries });
@@ -96,32 +98,33 @@ public:
         return async_event(Inspect { std::move(cb) });
     }
 
-    PeerServer(PeerDB& db, const Config&);
+    PeerServer(PeerDB& db, const ConfigParams&);
     ~PeerServer()
     {
-        async_shutdown();
-        worker.join();
+        shutdown();
+        wait_for_shutdown();
     }
+    void start();
 
 private:
     struct RegisterPeer {
-        EndpointAddress a;
+        TCPSockaddr a;
     };
     struct SeenPeer {
-        EndpointAddress a;
+        TCPSockaddr a;
     };
     struct GetRecentPeers {
-        std::function<void(std::vector<std::pair<EndpointAddress, uint32_t>>&&)> cb;
+        std::function<void(std::vector<std::pair<TCPSockaddr, uint32_t>>&&)> cb;
         size_t maxEntries;
     };
     struct Inspect {
         std::function<void(const PeerServer&)> cb;
     };
-    using Event = std::variant<Offense, NewConnection, GetOffenses, Unban, BannedCB, RegisterPeer, SeenPeer, GetRecentPeers, Inspect>;
-    [[nodiscard]] bool async_event(Event e)
+    using Event = std::variant<OnClose, Authenticate, GetOffenses, Unban, banned_callback_t, RegisterPeer, SeenPeer, GetRecentPeers, Inspect>;
+    bool async_event(Event e)
     {
         std::unique_lock<std::mutex> l(mutex);
-        if (shutdown)
+        if (_shutdown)
             return false;
         events.push(std::move(e));
         hasWork = true;
@@ -137,22 +140,25 @@ private:
     PeerDB& db;
     uint32_t now;
     BanCache bancache;
-    void handle_event(Offense&&);
+    void handle_event(OnClose&&);
     void handle_event(Unban&&);
     void handle_event(GetOffenses&&);
-    void handle_event(NewConnection&&);
-    void handle_event(BannedCB&&);
+    void handle_event(Authenticate&&);
+    void handle_event(banned_callback_t&&);
     void handle_event(RegisterPeer&&);
     void handle_event(SeenPeer&&);
     void handle_event(GetRecentPeers&&);
     void handle_event(Inspect&&);
+
+    void on_close(const OnClose&, const TCPSockaddr&);
+    void on_close(const OnClose&, const WebRTCSockaddr&);
 
     ////////////////
     // Mutex protected variables
     std::mutex mutex;
     bool hasWork = false;
     bool enableBan;
-    bool shutdown = false;
+    bool _shutdown = false;
     std::queue<Event> events;
     std::condition_variable cv;
 

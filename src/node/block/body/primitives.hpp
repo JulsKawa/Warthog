@@ -7,7 +7,7 @@
 
 class Address;
 class HashView;
-class TransferView;
+struct TransferView;
 
 class PaymentCreateMessage;
 
@@ -15,10 +15,11 @@ namespace mempool {
 struct EntryValue;
 }
 
-struct TransferTxExchangeMessage {
+class TransferTxExchangeMessage {
 public:
     // layout:
     static constexpr size_t bytesize = 16 + 3 + 2 + 20 + 8 + 65;
+    static constexpr size_t byte_size() { return bytesize; }
     TransferTxExchangeMessage(ReaderCheck<bytesize> r);
     TransferTxExchangeMessage(AccountId fromId, const PaymentCreateMessage& pcm);
     TransferTxExchangeMessage(const TransactionId& txid, const mempool::EntryValue&);

@@ -1,39 +1,48 @@
 #pragma once
 
 #include "block/chain/signed_snapshot.hpp"
-#include "general/tcp_util.hpp"
+#include "expected.hpp"
+#include "transport/helpers/socket_addr.hpp"
+#include "transport/helpers/tcp_sockaddr.hpp"
 #include <atomic>
 struct gengetopt_args_info;
-struct EndpointVector: public std::vector<EndpointAddress> {
-    using vector::vector;
-    EndpointVector(std::vector<EndpointAddress> v):vector(std::move(v)){}
-    EndpointVector(std::initializer_list<std::string> l){
-        for (auto &s : l) {
-            push_back({s});
+struct EndpointVector : public std::vector<TCPSockaddr> {
+    EndpointVector(){}
+    EndpointVector(std::vector<TCPSockaddr> v)
+        : vector(std::move(v))
+    {
+    }
+    EndpointVector(std::initializer_list<std::string> l)
+    {
+        for (auto& s : l) {
+            push_back(TCPSockaddr { s } );
         }
     }
 };
-struct Config {
+struct ConfigParams {
+    static constexpr IPv4 localhost { "127.0.0.1" };
+    static bool mount_opfs(const char* mountpoint);
     struct Data {
         std::string chaindb;
         std::string peersdb;
     } data;
     struct JSONRPC {
-        EndpointAddress bind;
+        TCPSockaddr bind { localhost, 3000 };
     } jsonrpc;
     struct PublicAPI {
-        EndpointAddress bind;
+        TCPSockaddr bind;
     };
     struct StratumPool {
-        EndpointAddress bind;
+        TCPSockaddr bind;
     };
     std::optional<PublicAPI> publicAPI;
     std::optional<StratumPool> stratumPool;
     struct Node {
+        static constexpr TCPSockaddr default_endpoint { localhost, DEFAULT_ENDPOINT_PORT };
         std::optional<SnapshotSigner> snapshotSigner;
-        EndpointAddress bind;
+        TCPSockaddr bind { default_endpoint };
         bool isolated { false };
-        std::atomic<bool> logCommunication { false };
+        bool logCommunicationVal { false };
     } node;
     struct Peers {
         bool allowLocalhostIp = false; // do not ignore 127.xxx.xxx.xxx peer node addresses provided by peers
@@ -42,11 +51,14 @@ struct Config {
     } peers;
     bool localDebug { false };
 
+    static std::string get_default_datadir();
     std::string dump();
-    const std::string defaultDataDir;
-    int init(int argc, char** argv);
+    [[nodiscard]] static tl::expected<ConfigParams, int> from_args(int argc, char** argv);
 
-    Config();
 private:
-    int process_gengetopt(gengetopt_args_info&);
+    int init(const gengetopt_args_info&);
+};
+struct Config : public ConfigParams {
+    Config(ConfigParams&&);
+    std::atomic<bool> logCommunication { false };
 };

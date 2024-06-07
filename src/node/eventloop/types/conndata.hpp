@@ -5,13 +5,20 @@
 #include "eventloop/sync/header_download/connection_data.hpp"
 #include "eventloop/timer.hpp"
 #include "mempool/subscription_declaration.hpp"
+#include "peer_requests.hpp"
+#include "rtc/peer_rtc_state.hpp"
+#include "transport/connection_base.hpp"
 
 class Timerref {
 public:
     Timerref(Timer& t)
-        : timer_iter(t.end()) {}
+        : timer_iter(t.end())
+    {
+    }
     Timerref(Timer::iterator iter)
-        : timer_iter(iter) {}
+        : timer_iter(iter)
+    {
+    }
     Timer::iterator& timer_ref() { return timer_iter; }
     void reset_expired(Timer& t)
     {
@@ -87,9 +94,10 @@ struct ConnectionJob : public Timerref {
             throw Error(EUNREQUESTED);
     }
 
-    [[nodiscard]] bool awaiting_init() const { 
+    [[nodiscard]] bool awaiting_init() const
+    {
         assert(!data_v.valueless_by_exception());
-        return std::holds_alternative<AwaitInit>(data_v); 
+        return std::holds_alternative<AwaitInit>(data_v);
     }
 
     void restart_expired(Timer::iterator iter, Timer& t)
@@ -102,7 +110,7 @@ struct ConnectionJob : public Timerref {
     data_t data_v;
 
     template <typename T>
-    requires std::derived_from<T, WithNonce>
+    // requires T::is_reply // TODO
     auto pop_req(T& rep, Timer& t, size_t& activeRequests)
     {
         using type = typename typemap<T>::type;
@@ -113,7 +121,7 @@ struct ConnectionJob : public Timerref {
         auto out = std::get<type>(data_v);
         assert(!data_v.valueless_by_exception());
         out.unref_active_requests(activeRequests);
-        if (rep.nonce != out.nonce) {
+        if (rep.nonce() != out.nonce()) {
             throw Error(EUNREQUESTED);
         }
         reset_notexpired<type>(t);
@@ -153,19 +161,37 @@ private:
 };
 
 struct Ping : public Timerref {
+    struct PingV2Data {
+        struct ExtraData {
+            ExtraData(uint64_t signalingListDiscardIndex)
+                : signalingListDiscardIndex(signalingListDiscardIndex)
+            {
+            }
+            uint64_t signalingListDiscardIndex;
+        } extraData;
+        PingV2Msg msg;
+    };
     Ping(Timer& end)
-        : Timerref(end) {}
+        : Timerref(end)
+    {
+    }
     void await_pong(PingMsg msg, Timer::iterator iter)
     {
-        assert(!data);
-        data = msg;
+        assert(!has_value());
+        data = std::move(msg);
+        timer_iter = iter;
+    }
+    void await_pong_v2(PingV2Data d, Timer::iterator iter)
+    {
+        assert(!has_value());
+        data = std::move(d);
         timer_iter = iter;
     }
     Timer::iterator sleep(Timer::iterator iter)
     {
         auto tmp = timer_iter;
-        assert(data);
-        data.reset();
+        assert(has_value());
+        data = std::monostate();
         timer_iter = iter;
         return tmp;
     }
@@ -173,18 +199,30 @@ struct Ping : public Timerref {
     {
         timer_iter = timer.end();
     }
-    PingMsg& check(const PongMsg& m)
+    auto& check(const PongV2Msg& m)
     {
-        if (!data)
+        if (!std::holds_alternative<PingV2Data>(data))
             throw Error(EUNREQUESTED);
-        auto e = m.check(*data);
+        auto& d { std::get<PingV2Data>(data) };
+        auto e = m.check(d.msg);
         if (e)
             throw e;
-        return *data;
+        return d;
+    }
+    PingMsg& check(const PongMsg& m)
+    {
+        if (!std::holds_alternative<PingMsg>(data))
+            throw Error(EUNREQUESTED);
+        auto& d { std::get<PingMsg>(data) };
+        auto e = m.check(d);
+        if (e)
+            throw e;
+        return d;
     }
 
 private:
-    std::optional<PingMsg> data;
+    bool has_value() const { return !std::holds_alternative<std::monostate>(data); }
+    std::variant<std::monostate, PingMsg, PingV2Data> data;
 };
 
 struct Ratelimit {
@@ -215,13 +253,16 @@ struct Usage {
 namespace BlockDownload {
 class Attorney;
 }
-struct PeerState {
-    PeerState(std::shared_ptr<Connection> c, HeaderDownload::Downloader& h, BlockDownload::Downloader& b, Timer& t);
-    std::shared_ptr<Connection> c;
+
+class PeerState {
+public:
+    PeerState(std::shared_ptr<ConnectionBase> c, HeaderDownload::Downloader& h, BlockDownload::Downloader& b, Timer& t);
+    std::shared_ptr<ConnectionBase> c;
     std::optional<mempool::SubscriptionIter> subscriptionIter;
     ConnectionJob job;
     Height txSubscription { 0 };
     Ratelimit ratelimit;
+    PeerRTCState rtcState;
     SignedSnapshot::Priority acknowledgedSnapshotPriority;
     SignedSnapshot::Priority theirSnapshotPriority;
     uint32_t lastNonce;
@@ -240,27 +281,19 @@ private:
     PeerChain chain;
 };
 
-bool Conref::operator==(Conref other) const { return data.iter == other.data.iter; }
-Conref::operator Connection*()
-{
-    if (valid())
-        return data.iter->second.c.get();
-    return nullptr;
-}
-Conref::operator const Connection*() const
-{
-    if (valid())
-        return data.iter->second.c.get();
-    return nullptr;
-}
-const PeerChain& Conref::chain() const { return data.iter->second.chain; }
-PeerChain& Conref::chain() { return data.iter->second.chain; }
-auto& Conref::job() { return data.iter->second.job; }
-auto& Conref::job() const{ return data.iter->second.job; }
-auto& Conref::ping() { return data.iter->second.ping; }
-auto Conref::operator->() { return &(data.iter->second); }
-bool Conref::initialized() { return !data.iter->second.job.waiting_for_init(); }
+inline bool Conref::operator==(const Conref& cr) const { return iter == cr.iter; }
+inline const PeerChain& Conref::chain() const { return iter->second.chain; }
+inline PeerChain& Conref::chain() { return iter->second.chain; }
+inline auto& Conref::job() { return iter->second.job; }
+inline auto& Conref::job() const { return iter->second.job; }
+inline auto& Conref::rtc() { return iter->second.rtcState; }
+inline auto Conref::peer() const { return iter->second.c->peer_addr(); }
+inline auto& Conref::ping() { return iter->second.ping; }
+inline auto Conref::operator->() { return &(iter->second); }
+inline auto Conref::version() const{ return iter->second.c->protocol_version();}
+inline bool Conref::initialized() const { return !iter->second.job.waiting_for_init(); }
+inline bool Conref::is_native() const { return iter->second.c->is_native(); }
 inline uint64_t Conref::id() const
 {
-    return data.iter->first;
+    return iter->first;
 }

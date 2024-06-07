@@ -7,27 +7,41 @@ class HTTPEndpoint;
 class PeerServer;
 class ChainServer;
 class Eventloop;
-class Conman;
+class TCPConnectionManager;
+class WSConnectionManager;
 namespace spdlog {
 class logger;
 }
+namespace uvw{
+    class loop;
+}
 
 struct Global {
-    ChainServer* pcs;
-    PeerServer* pps;
-    Conman* pcm;
-    Eventloop* pel;
-    BatchRegistry* pbr;
+#ifndef DISABLE_LIBUV
+    TCPConnectionManager* conman;
+    WSConnectionManager* wsconman;
     HTTPEndpoint* httpEndpoint;
+#endif
+    ChainServer* chainServer;
+    PeerServer* peerServer;
+    Eventloop* core;
+    BatchRegistry* batchRegistry;
     std::shared_ptr<spdlog::logger> connLogger;
     std::shared_ptr<spdlog::logger> syncdebugLogger;
-    Config conf;
+    std::optional<Config> conf;
 };
+extern std::atomic<bool> shutdownSignal;
 
 const Global& global();
-HTTPEndpoint& http_endpoint();
 inline spdlog::logger& connection_log() { return *global().connLogger; }
 inline spdlog::logger& syncdebug_log() { return *global().syncdebugLogger; }
 const Config& config();
 int init_config(int argc, char** argv);
-void global_init(BatchRegistry* pbr, PeerServer* pps, ChainServer* pcs, Conman* pcm, Eventloop* pel, HTTPEndpoint* httpEndpoint);
+void start_global_services();
+
+#ifndef DISABLE_LIBUV
+HTTPEndpoint& http_endpoint();
+void global_init(BatchRegistry* pbr, PeerServer* pps, ChainServer* pcs, TCPConnectionManager* pcm, WSConnectionManager* wcm, Eventloop* pel, HTTPEndpoint* httpEndpoint);
+#else
+void global_init(BatchRegistry* pbr, PeerServer* pps, ChainServer* pcs, Eventloop* pel);
+#endif

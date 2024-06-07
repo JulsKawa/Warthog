@@ -1,36 +1,36 @@
-#include "api/http/endpoint.hpp"
-#include "asyncio/conman.hpp"
-#include "api/stratum/stratum_server.hpp"
+#include "chainserver/db/chain_db.hpp"
 #include "chainserver/server.hpp"
-#include "db/chain_db.hpp"
-#include "db/peer_db.hpp"
 #include "eventloop/eventloop.hpp"
 #include "general/errors.hpp"
 #include "global/globals.hpp"
 #include "peerserver/peerserver.hpp"
 #include "spdlog/spdlog.h"
+#include "transport/ws/native/conman.hpp"
+#include "transport/ws/start_connection.hpp"
 
-#include <iostream>
-using namespace std;
-
+#ifndef DISABLE_LIBUV
+static void shutdown(int32_t reason);
+#include "api/http/endpoint.hpp"
+#include "api/stratum/stratum_server.hpp"
+#include "transport/tcp/conman.hpp"
+#include "uvw.hpp"
 static void signal_caller(uv_signal_t* /*handle*/, int signum)
 {
     spdlog::info("Terminating...");
     switch (signum) {
     case SIGTERM:
-        global().pcm->close(ESIGTERM);
+        shutdown(ESIGTERM);
         return;
     case SIGHUP:
-        global().pcm->close(ESIGHUP);
+        shutdown(ESIGHUP);
         return;
     case SIGINT:
-        global().pcm->close(ESIGINT);
+        shutdown(ESIGINT);
         return;
     default:;
     }
 }
 
-#include <string>
 static uv_signal_t sigint, sighup, sigterm;
 void setup_signals(uv_loop_t* l)
 {
@@ -61,6 +61,23 @@ void free_signals()
     uv_close((uv_handle_t*)&sigterm, nullptr);
 }
 
+static void shutdown(int32_t reason)
+{
+    shutdownSignal.store(true);
+    global().core->shutdown(reason);
+    global().chainServer->shutdown();
+    global().peerServer->shutdown();
+#ifndef DISABLE_LIBUV
+    global().conman->shutdown(reason);
+    global().wsconman->shutdown(reason);
+    global().wsconman->wait_for_shutdown();
+#endif
+    global().core->wait_for_shutdown();
+    global().chainServer->wait_for_shutdown();
+    global().peerServer->wait_for_shutdown();
+}
+#endif
+
 void initialize_srand()
 {
     using namespace std::chrono;
@@ -70,6 +87,9 @@ void initialize_srand()
 struct ECC {
     ECC() { ECC_Start(); }
     ~ECC() { ECC_Stop(); }
+};
+struct Starter {
+    Starter() { }
 };
 
 int main(int argc, char** argv)
@@ -85,50 +105,71 @@ int main(int argc, char** argv)
     spdlog::info("Peers database: {}", config().data.peersdb);
 
     // spdlog::flush_on(spdlog::level::debug);
-    /////////////////////
+#ifndef DISABLE_LIBUV
     // uv loop
-    uv_loop_t l;
-    uv_loop_init(&l);
+    auto l { uvw::loop::create() };
+#endif
 
     spdlog::debug("Opening peers database \"{}\"", config().data.peersdb);
     PeerDB pdb(config().data.peersdb);
     PeerServer ps(pdb, config());
-    spdlog::info("{} IPs are currently blacklisted.", pdb.get_banned_peers().size());
 
     spdlog::debug("Opening chain database \"{}\"", config().data.chaindb);
     ChainDB db(config().data.chaindb);
-    auto cs =ChainServer::make_chain_server(db, breg, config().node.snapshotSigner);
+    auto cs = ChainServer::make_chain_server(db, breg, config().node.snapshotSigner);
 
+    auto el { Eventloop::create(ps, *cs, config()) };
+
+#ifndef DISABLE_LIBUV
     std::optional<StratumServer> stratumServer;
     if (config().stratumPool) {
         stratumServer.emplace(config().stratumPool->bind);
     }
-    Eventloop el(ps, *cs, config());
-    Conman cm(&l, ps, config());
-
+    TCPConnectionManager cm(l, ps, config());
+    WSConnectionManager wscm(ps, 10001);
     // setup signals
-    setup_signals(&l);
-
-    spdlog::debug("Starting libuv loop");
+    setup_signals(l->raw());
 
     // starting endpoint
     HTTPEndpoint endpoint { config().jsonrpc.bind };
-    auto endpointPublic { HTTPEndpoint::make_public_endpoint(config())};
+    auto endpointPublic { HTTPEndpoint::make_public_endpoint(config()) };
+
+    global_init(&breg, &ps, &*cs, &cm, &wscm, el.get(), &endpoint);
+#else
+    global_init(&breg, &ps, &*cs, el.get());
+#endif
 
     // setup globals
-    global_init(&breg, &ps, &*cs, &cm, &el, &endpoint);
 
-    // running eventloops
-    el.start_async_loop();
-    if ((i = uv_run(&l, UV_RUN_DEFAULT)))
+    // spawn new threads
+    ps.start();
+    cs->start();
+    el->start();
+#ifdef DISABLE_LIBUV
+    auto a { WSSockaddr::parse("127.0.0.1:10001") };
+    WSSockaddr addr { a.value() };
+    start_connection(make_request(addr, std::chrono::seconds(1)));
+#endif
+
+#ifdef DISABLE_LIBUV
+    while (true) {
+        sleep(1000); // don't shut down
+    }
+    return 0;
+#else
+    endpoint.start();
+    wscm.start();
+    spdlog::debug("Starting libuv loop");
+    // running eventloop
+    if ((i = l->run(uvw::loop::run_mode::DEFAULT)))
         goto error;
     free_signals();
-    if ((i = uv_run(&l, UV_RUN_DEFAULT)))
+    if ((i = l->run(uvw::loop::run_mode::DEFAULT)))
         goto error;
-    uv_loop_close(&l);
-
+    l->close();
     return 0;
 error:
     spdlog::error("libuv error:", errors::err_name(i));
     return i;
+#endif
 }

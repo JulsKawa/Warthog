@@ -2,9 +2,9 @@
 #include "cmdline/cmdline.hpp"
 #include "general/errors.hpp"
 #include "general/is_testnet.hpp"
-#include "general/tcp_util.hpp"
 #include "spdlog/spdlog.h"
 #include "toml++/toml.hpp"
+#include "transport/helpers/tcp_sockaddr.hpp"
 #include "version.hpp"
 #include <filesystem>
 #include <iostream>
@@ -14,13 +14,17 @@
 #include <sys/types.h>
 #include <unistd.h>
 #endif
+#ifdef __linux__
+#include <pwd.h>
+#endif
 
 using namespace std;
 
-std::string get_default_datadir()
+#ifndef DISABLE_LIBUV
+std::string ConfigParams::get_default_datadir()
 {
-    const char* osBaseDir = nullptr;
 #ifdef __linux__
+    const char* osBaseDir = nullptr;
     if ((osBaseDir = getenv("HOME")) == NULL) {
         osBaseDir = getpwuid(getuid())->pw_dir;
     }
@@ -28,11 +32,13 @@ std::string get_default_datadir()
         throw std::runtime_error("Cannot determine default data directory.");
     return std::string(osBaseDir) + "/.warthog/";
 #elif _WIN32
+    const char* osBaseDir = nullptr;
     osBaseDir = getenv("LOCALAPPDATA");
     if (osBaseDir == nullptr)
         throw std::runtime_error("Cannot determine default data directory.");
     return std::string(osBaseDir) + "/Warthog/";
 #elif __APPLE__
+    const char* osBaseDir = nullptr;
     if ((osBaseDir = getenv("HOME")) == NULL) {
         osBaseDir = getpwuid(getuid())->pw_dir;
     }
@@ -44,10 +50,29 @@ std::string get_default_datadir()
 #endif
 }
 
-Config::Config()
-    : defaultDataDir(get_default_datadir())
+#else
+
+#include <emscripten.h>
+#include <emscripten/wasmfs.h>
+#include <unistd.h>
+bool ConfigParams::mount_opfs(const char* mountpoint)
 {
+    spdlog::info("Mounting OPFS at {}", mountpoint);
+    auto pOpfs = wasmfs_create_opfs_backend();
+    if (!pOpfs)
+        return false;
+    bool exists = access(mountpoint, F_OK) == 0;
+    if (exists)
+        return true;
+
+    const int rc = wasmfs_create_directory(mountpoint, 0777, pOpfs);
+    return rc == 0;
 }
+std::string ConfigParams::get_default_datadir()
+{
+    return "/opfs/";
+}
+#endif
 
 namespace {
 std::optional<SnapshotSigner> parse_leader_key(std::string privKey)
@@ -62,20 +87,51 @@ std::optional<SnapshotSigner> parse_leader_key(std::string privKey)
     return {};
 }
 
-}
-
-int Config::init(int argc, char** argv)
-{
-    // default peer
-
-    gengetopt_args_info ai;
-    if (cmdline_parser(argc, argv, &ai) != 0) {
-        return -1;
+struct CmdlineParsed {
+    static std::optional<CmdlineParsed> parse(int argc, char** argv)
+    {
+        gengetopt_args_info ai;
+        if (cmdline_parser(argc, argv, &ai) != 0)
+            return {};
+        return CmdlineParsed { ai };
     }
-    int res = process_gengetopt(ai);
-    cmdline_parser_free(&ai);
-    return res;
+    CmdlineParsed(const CmdlineParsed&) = delete;
+    CmdlineParsed(CmdlineParsed&& other)
+        :ai(other.ai)
+    {
+        other.deleteOnDestruction = false;
+    };
+    ~CmdlineParsed()
+    {
+        if (deleteOnDestruction) {
+            cmdline_parser_free(&ai);
+        }
+    }
+    auto& value() const { return ai; }
+
+private:
+    CmdlineParsed(gengetopt_args_info& ai0)
+        : ai(ai0)
+    {
+    }
+
+    bool deleteOnDestruction { true };
+    gengetopt_args_info ai;
+};
 }
+
+tl::expected<ConfigParams, int> ConfigParams::from_args(int argc, char** argv)
+{
+    if (auto p { CmdlineParsed::parse(argc, argv) }) {
+        ConfigParams c;
+        if (auto i { c.init(p->value()) }; i < 1) {
+            return tl::make_unexpected(i);
+        }
+        return c;
+    }
+    return tl::make_unexpected(-1);
+}
+
 namespace {
 void warning_config(const toml::key k)
 {
@@ -92,9 +148,9 @@ template <typename T>
     throw std::runtime_error("Cannot extract configuration value starting at line "s + std::to_string(n.source().begin.line) + ", colum "s + std::to_string(n.source().begin.column) + ".");
 }
 
-EndpointAddress fetch_endpointaddress(toml::node& n)
+TCPSockaddr fetch_endpointaddress(toml::node& n)
 {
-    auto p = EndpointAddress::parse(fetch<std::string>(n));
+    auto p = TCPSockaddr::parse(fetch<std::string>(n));
     if (p) {
         return p.value();
     }
@@ -109,12 +165,13 @@ toml::array& array_ref(toml::node& n)
 }
 EndpointVector parse_endpoints(std::string csv)
 {
-    std::vector<EndpointAddress> out;
+    std::vector<TCPSockaddr> out;
+#ifndef DISABLE_LIBUV
     std::string::size_type pos = 0;
     while (true) {
         auto end = csv.find(",", pos);
         auto param = csv.substr(pos, end - pos);
-        auto parsed = EndpointAddress::parse(param);
+        auto parsed = TCPSockaddr::parse(param);
         if (!parsed) {
             throw std::runtime_error("Invalid parameter '"s + param + "'."s);
         }
@@ -124,17 +181,22 @@ EndpointVector parse_endpoints(std::string csv)
         }
         pos = end + 1;
     }
+#endif
     return out;
 }
 } // namespace
 
-int Config::process_gengetopt(gengetopt_args_info& ai)
+int ConfigParams::init(const gengetopt_args_info& ai)
 {
     bool dmp(ai.dump_config_given);
     if (!dmp)
         spdlog::info("Warthog Node v{}.{}.{} ", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
 
-    // Log
+        // Log
+#ifdef DISABLE_LIBUV
+    assert(ConfigParams::mount_opfs("/opfs"));
+#endif
+    const auto defaultDataDir { get_default_datadir() };
     if (ai.debug_given)
         spdlog::set_level(spdlog::level::debug);
 
@@ -147,25 +209,25 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
         }
     }
     // copy default values
-    std::optional<EndpointAddress> nodeBind;
-    std::optional<EndpointAddress> rpcBind;
-    std::optional<EndpointAddress> publicrpcBind;
-    std::optional<EndpointAddress> stratumBind;
+    std::optional<TCPSockaddr> nodeBind;
+    std::optional<TCPSockaddr> rpcBind;
+    std::optional<TCPSockaddr> publicrpcBind;
+    std::optional<TCPSockaddr> stratumBind;
     node.isolated = ai.isolated_given;
     if (ai.testnet_given) {
         enable_testnet();
     }
     if (ai.enable_public_given) {
-        publicrpcBind = EndpointAddress("0.0.0.0:3001");
+        publicrpcBind = TCPSockaddr("0.0.0.0:3001");
     }
 
     if (is_testnet()) {
-        peers.connect = {
+        peers.connect = EndpointVector {
             "193.218.118.57:9286",
             "98.71.18.140:9286"
         };
     } else {
-        peers.connect = {
+        peers.connect = EndpointVector {
             "193.218.118.57:9186",
             "96.41.20.26:9186",
             "89.163.224.253:9186",
@@ -188,6 +250,7 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
             return -1;
         }
     } else {
+#ifndef DISABLE_LIBUV
         if (ai.config_given)
             filename = ai.config_arg;
         if (!dmp)
@@ -246,7 +309,7 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
                         } else if (k == "allow-localhost-ip") {
                             peers.allowLocalhostIp = fetch<bool>(v);
                         } else if (k == "log-communication") {
-                            node.logCommunication = fetch<bool>(v);
+                            node.logCommunicationVal = fetch<bool>(v);
                         } else
                             warning_config(k);
                     }
@@ -267,6 +330,7 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
             std::cerr << e.what();
             return -1;
         }
+#endif
     }
 
     // DB args
@@ -283,12 +347,12 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
             data.peersdb = defaultDataDir + (is_testnet() ? "testnet_peers.db3" : "peers.db3");
         }
     }
-    if (ai.temporary_given) 
+    if (ai.temporary_given)
         data.chaindb = "";
 
     // Stratum API socket
     if (ai.stratum_given) {
-        auto p = EndpointAddress::parse(ai.stratum_arg);
+        auto p = TCPSockaddr::parse(ai.stratum_arg);
         if (!p) {
             std::cerr << "Bad --stratum option '" << ai.rpc_arg << "'.\n";
             return -1;
@@ -302,7 +366,7 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
 
     // JSON RPC socket
     if (ai.rpc_given) {
-        auto p = EndpointAddress::parse(ai.rpc_arg);
+        auto p = TCPSockaddr::parse(ai.rpc_arg);
         if (!p) {
             std::cerr << "Bad --rpc option '" << ai.rpc_arg << "'.\n";
             return -1;
@@ -311,17 +375,17 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
     } else {
         if (rpcBind) {
             jsonrpc.bind = *rpcBind;
-        }else{
+        } else {
             if (is_testnet())
-                jsonrpc.bind = EndpointAddress::parse("127.0.0.1:3100").value();
+                jsonrpc.bind = TCPSockaddr::parse("127.0.0.1:3100").value();
             else
-                jsonrpc.bind = EndpointAddress::parse("127.0.0.1:3000").value();
+                jsonrpc.bind = TCPSockaddr::parse("127.0.0.1:3000").value();
         }
     }
 
     // JSON Public RPC socket
     if (ai.publicrpc_given) {
-        auto p = EndpointAddress::parse(ai.publicrpc_arg);
+        auto p = TCPSockaddr::parse(ai.publicrpc_arg);
         if (!p) {
             std::cerr << "Bad --publicrpc option '" << ai.rpc_arg << "'.\n";
             return -1;
@@ -335,7 +399,7 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
 
     // Node socket
     if (ai.bind_given) {
-        auto p = EndpointAddress::parse(ai.bind_arg);
+        auto p = TCPSockaddr::parse(ai.bind_arg);
         if (!p) {
             std::cerr << "Bad --bind option '" << ai.bind_arg << "'.\n";
             return -1;
@@ -346,9 +410,9 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
             node.bind = *nodeBind;
         else {
             if (is_testnet())
-                node.bind = EndpointAddress::parse("0.0.0.0:9286").value();
+                node.bind = TCPSockaddr::parse("0.0.0.0:9286").value();
             else
-                node.bind = EndpointAddress::parse("0.0.0.0:9186").value();
+                node.bind = TCPSockaddr::parse("0.0.0.0:9186").value();
         }
     }
     if (ai.connect_given) {
@@ -362,7 +426,7 @@ int Config::process_gengetopt(gengetopt_args_info& ai)
     return 1;
 }
 
-std::string Config::dump()
+std::string ConfigParams::dump()
 {
     toml::table tbl;
     tbl.insert_or_assign("jsonrpc", toml::table {
@@ -374,9 +438,9 @@ std::string Config::dump()
         connect.push_back(ea.to_string());
     }
     tbl.insert_or_assign("stratum",
-            toml::table {
+        toml::table {
             { "bind", stratumPool ? stratumPool->bind.to_string() : ""s },
-            });
+        });
     tbl.insert_or_assign("node",
         toml::table {
             { "bind", node.bind.to_string() },
@@ -384,12 +448,18 @@ std::string Config::dump()
             { "isolated", node.isolated },
             { "enable-ban", peers.enableBan },
             { "allow-localhost-ip", peers.allowLocalhostIp },
-            { "log-communication", (bool)node.logCommunication } });
+            { "log-communication", (bool)node.logCommunicationVal } });
     tbl.insert_or_assign("db", toml::table {
                                    { "chain-db", data.chaindb },
                                    { "peers-db", data.peersdb },
                                });
     stringstream ss;
-    ss << tbl<<endl;
+    ss << tbl << endl;
     return ss.str();
+}
+
+Config::Config(ConfigParams&& params)
+    : ConfigParams(std::move(params))
+{
+    logCommunication = node.logCommunicationVal;
 }

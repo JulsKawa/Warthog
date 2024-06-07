@@ -3,6 +3,7 @@
 #include "block/header/header_impl.hpp"
 #include "general/is_testnet.hpp"
 #include "general/now.hpp"
+#include "general/writer.hpp"
 #include "global/globals.hpp"
 #include "timestamprule.hpp"
 
@@ -17,6 +18,10 @@ auto last_element_vector(const Headerchain& hc, Batchslot begin)
     }
     return v;
 }
+}
+
+Writer& operator<<(Writer& w, const Headervec& hv){
+    return w<<Range(hv.bytes);
 }
 
 Headervec::Headervec(const std::vector<HeaderView>& v)
@@ -82,6 +87,10 @@ Grid::Grid(std::span<const uint8_t> s)
         throw Error(EINV_GRID);
     assign(s.begin().base(), s.end().base());
 }
+Grid::Grid(Reader& r)
+    :Grid(r.span())
+{
+}
 
 Grid::Grid(const Headerchain& hc, Batchslot begin)
     : Headervec(last_element_vector(hc, begin))
@@ -93,4 +102,7 @@ bool Grid::valid_checkpoint() const
     auto cp = GridPin::checkpoint();
     return is_testnet() || (!cp)
         || (cp->slot < slot_end() && cp->finalHeader == operator[](cp->slot));
+}
+Writer& operator<<(Writer& w, const Grid& g){
+    return w<<Range(g.raw());
 }

@@ -30,13 +30,8 @@ public:
     std::optional<HeaderView> get_descriptor_header(Descriptor descriptor, Height height);
     ConsensusSlave get_chainstate();
 
-    void shutdown_join()
-    {
-        close();
-        if (worker.joinable()) {
-            worker.join();
-        }
-    }
+    void shutdown();
+    void wait_for_shutdown();
 
     struct MiningAppend {
         Block block;
@@ -174,6 +169,11 @@ public:
     {
         return std::make_shared<ChainServer>(b, br, snapshotSigner, Token {});
     }
+    void start()
+    {
+        assert(!worker.joinable());
+        worker = std::thread(&ChainServer::workerfun, this);
+    }
     ~ChainServer();
 
     bool is_busy();
@@ -208,7 +208,6 @@ public:
     void async_stage_request(stage_operation::Operation);
 
 private:
-    void close();
     ChainError apply_stage(ChainDBTransaction&& t);
     void workerfun();
     void dispatch_mining_subscriptions();

@@ -1,8 +1,8 @@
+#ifndef DISABLE_LIBUV
 #include "stratum_server.hpp"
 
 #include "api/interface.hpp"
 #include "block/header/header_impl.hpp"
-#include "general/tcp_util.hpp"
 #include "nlohmann/json.hpp"
 #include <cassert>
 #include <iostream>
@@ -363,7 +363,7 @@ void StratumServer::handle_events()
     }
 }
 
-void StratumServer::acceptor(EndpointAddress endpointAddress)
+void StratumServer::acceptor(TCPSockaddr endpointAddress)
 {
     std::shared_ptr<uvw::tcp_handle> tcp = loop->resource<uvw::tcp_handle>();
 
@@ -401,11 +401,11 @@ void StratumServer::acceptor(EndpointAddress endpointAddress)
     };
 
     ;
-    check_result(tcp->bind(endpointAddress.ipv4.to_string(), endpointAddress.port));
+    check_result(tcp->bind(endpointAddress.ip.to_string(), endpointAddress.port));
     check_result(tcp->listen());
 }
 
-StratumServer::StratumServer(EndpointAddress endpointAddress)
+StratumServer::StratumServer(TCPSockaddr endpointAddress)
     : loop(uvw::loop::create())
     , async(loop->resource<uvw::async_handle>())
 {
@@ -414,13 +414,17 @@ StratumServer::StratumServer(EndpointAddress endpointAddress)
         handle_events();
     });
     acceptor(endpointAddress);
-    t = std::thread([&]() { loop->run(); });
+}
+void StratumServer::start(){
+    assert(!worker.joinable());
+    worker = std::thread([&]() { loop->run(); });
 }
 
 StratumServer::~StratumServer()
 {
     shutdown();
-    t.join();
+    if (worker.joinable()) 
+        worker.join();
 }
 
 void StratumServer::push(Event e)
@@ -498,3 +502,4 @@ void StratumServer::unlink_authorized(const Address& a, stratum::Connection* c)
         addressData.erase(iter);
     }
 }
+#endif /* ifndef  */

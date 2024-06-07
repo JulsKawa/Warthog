@@ -1,6 +1,6 @@
 #include "consensus.hpp"
 #include "communication/create_payment.hpp"
-#include "db/chain_db.hpp"
+#include "chainserver/db/chain_db.hpp"
 #include "global/globals.hpp"
 #include <spdlog/spdlog.h>
 namespace chainserver {
@@ -186,7 +186,7 @@ auto Chainstate::append(AppendSingle d) -> HeaderchainAppend
     const Height l { length() };
 
     // adapt header chain and offsets
-    headerchain.append(d.prepared, *global().pbr);
+    headerchain.append(d.prepared, *global().batchRegistry);
     historyOffsets.append(d.newHistoryOffset);
     accountOffsets.append(d.newAccountOffset);
     assert_equal_length();

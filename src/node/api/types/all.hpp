@@ -1,5 +1,6 @@
 #pragma once
 
+#include "transport/helpers/socket_addr.hpp"
 #include "block/body/primitives.hpp"
 #include "block/chain/history/index.hpp"
 #include "block/chain/signed_snapshot.hpp"
@@ -8,10 +9,10 @@
 #include "block/header/header.hpp"
 #include "communication/mining_task.hpp"
 #include "crypto/address.hpp"
-#include "db/offense_entry.hpp"
+#include "peerserver/db/offense_entry.hpp"
 #include "eventloop/peer_chain.hpp"
 #include "general/funds.hpp"
-#include "general/tcp_util.hpp"
+#include "transport/helpers/tcp_sockaddr.hpp"
 #include "height_or_hash.hpp"
 #include "accountid_or_address.hpp"
 #include <variant>
@@ -144,7 +145,7 @@ struct HashrateChart {
 };
 
 struct Peerinfo {
-    EndpointAddress endpoint;
+    Sockaddr endpoint;
     bool initialized;
     PeerChain chainstate;
     SignedSnapshot::Priority theirSnapshotPriority;

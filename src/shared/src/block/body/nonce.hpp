@@ -1,11 +1,12 @@
 #pragma once
 #include "general/with_uint64.hpp"
+#include <array>
 #include <optional>
 class Height;
 class NonzeroHeight;
 class PinHeight;
 class Reader;
-class PinFloor;
+struct PinFloor;
 
 template <size_t>
 class ReaderCheck;
@@ -45,7 +46,6 @@ private:
 public:
     static std::optional<PinNonce> make_pin_nonce(NonceId, NonzeroHeight, PinHeight);
     PinNonce(Reader& r);
-    PinNonce(const PinNonce&) = default;
 
     PinHeight pin_height(PinFloor pf) const;
     uint32_t pin_offset() const

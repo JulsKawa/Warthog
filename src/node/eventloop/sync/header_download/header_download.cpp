@@ -122,9 +122,9 @@ void Downloader::release_first_queued_batch(Lead_iter li)
         }
         auto cr(iter->second.cr);
         if (cr) {
-            assert(data(cr).jobPtr == &iter->second);
-            iter->second.cr.clear();
-            data(cr).jobPtr = nullptr;
+            assert(data(*cr).jobPtr == &iter->second);
+            iter->second.cr.reset();
+            data(*cr).jobPtr = nullptr;
         }
         queuedBatches.erase(iter);
     }
@@ -170,7 +170,7 @@ bool Downloader::consider_insert_leader(Conref cr)
         return false;
 
     NonzeroSnapshot sn { cr.chain().descripted() };
-    auto o = global().pbr->find_last(sn.descripted->grid(), chains.signed_snapshot());
+    auto o = global().batchRegistry->find_last(sn.descripted->grid(), chains.signed_snapshot());
     if (!o)
         return false;
     auto& pin { *o };
@@ -224,7 +224,7 @@ void Downloader::queue_requests(Lead_iter li)
     }
 }
 
-Conref Downloader::try_send(ConnectionFinder& f, std::vector<ChainOffender> offenders, const ReqData& rd)
+std::optional<Conref> Downloader::try_send(ConnectionFinder& f, std::vector<ChainOffender> offenders, const ReqData& rd)
 { // OK
     uint32_t index = f.conIndex;
     uint32_t bound = connections.size();
@@ -377,9 +377,9 @@ std::vector<ChainOffender> Downloader::do_requests(RequestSender s)
                 // cache for later request pins
                 rd.cacheMatch = chains.lookup(q.pin_prev());
             }
-            if (Conref cr = try_send(cf, res, rd); cr.valid()) {
-                q.node().cr = cr;
-                data(cr).jobPtr = &q.node();
+            if (auto cr = try_send(cf, res, rd); cr.has_value()) {
+                q.node().cr = *cr;
+                data(*cr).jobPtr = &q.node();
             }
         }
     }
@@ -389,29 +389,29 @@ std::vector<ChainOffender> Downloader::do_requests(RequestSender s)
 void Downloader::on_request_expire(Conref cr, const Batchrequest&)
 {
     if (data(cr).jobPtr) {
-        data(cr).jobPtr->cr.clear();
+        data(cr).jobPtr->cr.reset();
         data(cr).jobPtr = nullptr;
     }
 }
 
 void Downloader::on_proberep(Conref c, const Proberequest& req, const ProberepMsg& rep)
 {
-    if (!rep.requested)
+    if (!rep.requested())
         return;
     auto& dat { data(c) };
 
     // match pin
     if (dat.probeData) {
         auto& pin { *dat.probeData };
-        if (pin.dsc->descriptor == req.descriptor)
-            pin.match(req.height, *rep.requested);
+        if (pin.dsc->descriptor == req.descriptor())
+            pin.match(req.height(), *rep.requested());
     }
 
     // match leader info
     if (is_leader(c)) {
         auto li = data(c).leaderIter;
-        if (li->snapshot.descripted->descriptor == req.descriptor)
-            li->probeData.match(req.height, *rep.requested);
+        if (li->snapshot.descripted->descriptor == req.descriptor())
+            li->probeData.match(req.height(), *rep.requested());
     }
 }
 
@@ -483,7 +483,7 @@ bool Downloader::advance_verifier(const Ver_iter* vi, const Lead_set& leaders, c
         return false;
     }
     HeaderVerifier& hv { a.value() };
-    auto sharedBatch { global().pbr->share(Batch { b }, (vi ? (*vi)->second.sb : SharedBatch {})) };
+    auto sharedBatch { global().batchRegistry->share(Batch { b }, (vi ? (*vi)->second.sb : SharedBatch {})) };
 
     // update maximizer
     Worksum worksum = sharedBatch.total_work();
@@ -580,13 +580,13 @@ auto Downloader::on_response(Conref cr, Batchrequest&& req, Batch&& res) -> std:
     // safety check
     const bool withJobIter = (data(cr).jobPtr != nullptr);
     if (withJobIter) {
-        data(cr).jobPtr->cr.clear();
+        data(cr).jobPtr->cr.reset();
         data(cr).jobPtr = nullptr;
         if (req.is_partial_request())
             spdlog::error("BUG in {}:{}: safety check failed.", __FILE__, __LINE__);
     }
 
-    const Batchslot batchSlot { Height { req.selector.startHeight } };
+    const Batchslot batchSlot { Height { req.selector().startHeight } };
 
     auto minWorkSnapshot = minWork;
     std::vector<Offender> offenders;
@@ -598,7 +598,7 @@ auto Downloader::on_response(Conref cr, Batchrequest&& req, Batch&& res) -> std:
             return {};
         auto li = data(cr).leaderIter;
         auto& d_old = *li->snapshot.descripted;
-        if (req.selector.descriptor != d_old.descriptor
+        if (req.selector().descriptor != d_old.descriptor
             || batchSlot != li->final_slot())
             return {};
         li->finalBatch = { std::move(b), std::get<Worksum>(req.extra) };
@@ -611,11 +611,11 @@ auto Downloader::on_response(Conref cr, Batchrequest&& req, Batch&& res) -> std:
         if (qi != queuedBatches.end() && cr == qi->second.cr) {
             if (!withJobIter)
                 spdlog::error("BUG in {}:{}: withJobIter==false.", __FILE__, __LINE__);
-            qi->second.cr.clear();
+            qi->second.cr.reset();
         }
 
         if (!b.complete())
-            return { ChainOffender { ChainError(EBATCHSIZE, req.selector.startHeight), cr } };
+            return { ChainOffender { ChainError(EBATCHSIZE, req.selector().startHeight), cr } };
         if (qi == queuedBatches.end())
             return {};
         auto& queued = qi->second;
@@ -665,7 +665,7 @@ bool Downloader::erase(Conref cr)
         select_leaders();
     }
     if (data(cr).jobPtr) {
-        data(cr).jobPtr->cr.clear();
+        data(cr).jobPtr->cr.reset();
         data(cr).jobPtr = nullptr;
     }
     return erased;

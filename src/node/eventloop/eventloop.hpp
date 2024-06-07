@@ -7,11 +7,15 @@
 #include "chainserver/state/update/update.hpp"
 #include "communication/stage_operation/result.hpp"
 #include "eventloop/timer.hpp"
+#include "eventloop/types/rtc/rtc_state.hpp"
+#include "general/move_only_function.hpp"
 #include "mempool/mempool.hpp"
 #include "mempool/subscription_declaration.hpp"
 #include "peerserver/peerserver.hpp"
 #include "sync/sync.hpp"
 #include "sync/sync_state.hpp"
+#include "timer_element.hpp"
+#include "transport/connection_base.hpp"
 #include "types/chainstate.hpp"
 #include "types/conndata.hpp"
 #include <condition_variable>
@@ -24,12 +28,17 @@
 
 #include <algorithm>
 
-class Connection;
+class RTCPendingOutgoing;
+class RTCPendingIncoming;
+class TCPConnection;
+class WSConnection;
+class RTCConnection;
 class Rcvbuffer;
 class Reader;
 class Eventprocessor;
 class EndAttorney;
-struct Config;
+class IP;
+struct ConfigParams;
 
 struct ForkMsg;
 struct AppendMsg;
@@ -40,14 +49,52 @@ namespace BlockDownload {
 class Attorney;
 }
 
-class Eventloop {
+class RTCData {
+    friend class RTCConnection;
+
+protected:
+    RTCState rtc;
+};
+class Eventloop final : public std::enable_shared_from_this<Eventloop>, public RTCData {
     using StateUpdate = chainserver::state_update::StateUpdate;
     friend class BlockDownload::Attorney;
     friend class EndAttorney;
 
+    struct Token { };
+    struct GeneratedVerificationSdpOffer {
+        std::weak_ptr<RTCConnection> con;
+        uint64_t peerId;
+        std::string sdp;
+    };
+    struct GeneratedVerificationSdpAnswer {
+        IP ownIp;
+        std::weak_ptr<RTCConnection> con;
+        uint64_t originConId;
+        std::string sdp;
+    };
+    struct GeneratedSdpOffer {
+        std::weak_ptr<RTCConnection> con;
+        uint64_t signalingServerId;
+        uint64_t signalingListKey;
+        std::string sdp;
+    };
+    struct GeneratedSdpAnswer {
+        IP ownIp;
+        std::weak_ptr<RTCConnection> con;
+        uint64_t signalingServerId;
+        size_t key;
+        std::string sdp;
+    };
+
 public:
+    Eventloop(Token, PeerServer& ps, ChainServer& ss, const ConfigParams& config);
+    struct StartTimer {
+        std::chrono::steady_clock::time_point wakeup;
+        MoveOnlyFunction<void()> on_expire;
+        MoveOnlyFunction<void(TimerElement)> on_timerstart;
+    };
     friend struct Inspector;
-    Eventloop(PeerServer&, ChainServer& ss, const Config& config);
+    static std::shared_ptr<Eventloop> create(PeerServer& ps, ChainServer& ss, const ConfigParams& config);
     ~Eventloop();
 
     // API callbacks
@@ -58,32 +105,38 @@ public:
     // Async functions
     // called by other threads
 
-    void async_state_update(StateUpdate&& s);
-    void async_mempool_update(mempool::Log&& s);
-    bool async_process(std::shared_ptr<Connection> c);
-    void async_erase(std::shared_ptr<Connection> c, int32_t error);
-    void async_shutdown(int32_t reason);
-    void async_report_failed_outbound(EndpointAddress);
-    void async_stage_action(stage_operation::Result);
-
-    void api_get_peers(PeersCb&& cb);
-    void api_get_synced(SyncedCb&& cb);
-    void api_get_hashrate(HashrateCb&& cb, size_t n=100);
+    bool async_process(std::shared_ptr<ConnectionBase> c);
+    bool async_register(ConnectionBase::ConnectionVariant con);
+    void api_get_hashrate(HashrateCb&& cb, size_t n = 100);
     void api_get_hashrate_chart(HashrateChartCb&& cb);
     void api_get_hashrate_chart(NonzeroHeight from, NonzeroHeight to, size_t window, HashrateChartCb&& cb);
+    void api_get_peers(PeersCb&& cb);
+    void api_get_synced(SyncedCb&& cb);
     void api_inspect(InspectorCb&&);
+    void start_timer(StartTimer);
+    void cancel_timer(const Timer::key_t&);
+    void async_mempool_update(mempool::Log&& s);
+    void async_report_failed_outbound(TCPSockaddr);
+    void shutdown(int32_t reason);
+    void wait_for_shutdown();
+    void async_stage_action(stage_operation::Result);
+    void async_state_update(StateUpdate&& s);
+    void notify_closed_rtc(std::shared_ptr<RTCConnection> rtc);
 
-    void start_async_loop();
+    void erase(std::shared_ptr<ConnectionBase> c);
+    void on_failed_connect(const ConnectRequest& r, Error reason);
+
+    void start();
 
 private:
-    std::vector<EndpointAddress> get_db_peers(size_t num);
+    std::vector<TCPSockaddr> get_db_peers(size_t num);
     //////////////////////////////
     // Important event loop functions
     void loop();
     bool has_work();
     void work();
     bool check_shutdown();
-    void process_connection(std::shared_ptr<Connection> c);
+    void process_connection(std::shared_ptr<ConnectionBase> c);
 
     //////////////////////////////
     // Private async functions
@@ -92,7 +145,7 @@ private:
 
     //////////////////////////////
     // Connection related functions
-    void erase(Conref cr, int32_t error);
+    void erase_internal(Conref cr);
     [[nodiscard]] bool insert(Conref cr, const InitMsg& data); // returns true if requests might be possbile
     void close(Conref cr, Error reason);
     void close_by_id(uint64_t connectionId, int32_t reason);
@@ -102,9 +155,11 @@ private:
 
     ////////////////////////
     // Handling incoming messages
-    void dispatch_message(Conref cr, Rcvbuffer& rb);
+    void dispatch_message(Conref cr, messages::Msg&& rb);
     void handle_msg(Conref cr, PingMsg&&);
+    void handle_msg(Conref cr, PingV2Msg&&);
     void handle_msg(Conref cr, PongMsg&&);
+    void handle_msg(Conref cr, PongV2Msg&&);
     void handle_msg(Conref cr, BatchreqMsg&&);
     void handle_msg(Conref cr, BatchrepMsg&&);
     void handle_msg(Conref cr, ProbereqMsg&&);
@@ -119,10 +174,22 @@ private:
     void handle_msg(Conref cr, TxreqMsg&&);
     void handle_msg(Conref cr, TxrepMsg&&);
     void handle_msg(Conref cr, LeaderMsg&&);
+    void handle_msg(Conref cr, RTCIdentity&&);
+    void handle_msg(Conref cr, RTCQuota&&);
+    void handle_msg(Conref cr, RTCSignalingList&&);
+    void handle_msg(Conref cr, RTCRequestForwardOffer&&);
+    void handle_msg(Conref cr, RTCForwardedOffer&&);
+    void handle_msg(Conref cr, RTCRequestForwardAnswer&&);
+    void handle_msg(Conref cr, RTCForwardedAnswer&&);
+    void handle_msg(Conref cr, RTCForwardOfferDenied&&);
+    void handle_msg(Conref cr, RTCVerificationOffer&&);
+    void handle_msg(Conref cr, RTCVerificationAnswer&&);
 
     ////////////////////////
     // convenience functions
     void consider_send_snapshot(Conref);
+
+    void send_schedule_signaling_lists();
 
     ////////////////////////
     // assign work to connections
@@ -138,6 +205,10 @@ private:
     RequestSender sender() { return RequestSender(*this); };
     void send_init(Conref cr);
 
+    /////////////////////////////
+    /// RTC verification
+    void try_verify_rtc_identities();
+
     ////////////////////////
     // Handling timeout events
     void handle_expired(Timer::Event&& data);
@@ -149,18 +220,20 @@ private:
     void cancel_timer(Timer::iterator& ref);
     void send_ping_await_pong(Conref cr);
     void received_pong_sleep_ping(Conref cr);
-    void update_wakeup();
 
     ////////////////////////
     // Timeout callbacks
     template <typename T>
     requires std::derived_from<T, Timer::WithConnecitonId>
     void handle_timeout(T&&);
-    void handle_timeout(Timer::Connect&&);
     void handle_connection_timeout(Conref, Timer::SendPing&&);
     void handle_connection_timeout(Conref, Timer::Expire&&);
     void handle_connection_timeout(Conref, Timer::CloseNoReply&&);
     void handle_connection_timeout(Conref, Timer::CloseNoPong&&);
+    void handle_timeout(Timer::ScheduledConnect&&);
+    void handle_timeout(Timer::CallFunction&&);
+    void handle_timeout(Timer::SendIdentityIps&&);
+
     void on_request_expired(Conref cr, const Proberequest&);
     void on_request_expired(Conref cr, const Batchrequest&);
     void on_request_expired(Conref cr, const Blockrequest&);
@@ -170,30 +243,19 @@ private:
     void process_blockdownload_stage();
 
     ////////////////////////
-    // establish new connections
-    void connect_scheduled();
-
-    ////////////////////////
     // event types
-    struct OnRelease {
-        std::shared_ptr<Connection> c;
-        int32_t error;
+    struct Erase {
+        std::shared_ptr<ConnectionBase> c;
+    };
+    struct RegisterConnection {
+        ConnectionBase::ConnectionVariant convar;
     };
     struct OnProcessConnection {
-        std::shared_ptr<Connection> c;
+        std::shared_ptr<ConnectionBase> c;
     };
     struct OnForwardBlockrep {
         uint64_t conId;
         std::vector<BodyContainer> blocks;
-    };
-    struct OnFailedAddressEvent {
-        EndpointAddress a;
-    };
-    struct OnPinAddress {
-        EndpointAddress a;
-    };
-    struct OnUnpinAddress {
-        EndpointAddress a;
     };
     struct GetHashrateChart {
         HashrateChartCb cb;
@@ -205,32 +267,51 @@ private:
         HashrateCb cb;
         size_t n;
     };
+    struct FailedConnect {
+        ConnectRequest connectRequest;
+        int32_t reason;
+    };
+    struct CancelTimer {
+        Timer::key_t timer;
+    };
+    struct RTCClosed { // RTC connection closed
+        std::shared_ptr<RTCConnection> con;
+    };
+
     // event queue
-    using Event = std::variant<OnRelease, OnProcessConnection,
+    using Event = std::variant<Erase, RegisterConnection, OnProcessConnection,
         StateUpdate, SignedSnapshotCb, PeersCb, SyncedCb, stage_operation::Result,
-        OnForwardBlockrep, OnFailedAddressEvent, InspectorCb, GetHashrate, GetHashrateChart,
-        OnPinAddress, OnUnpinAddress, mempool::Log>;
+        OnForwardBlockrep, InspectorCb, GetHashrate, GetHashrateChart,
+        FailedConnect,
+        mempool::Log, StartTimer, CancelTimer, RTCClosed, IdentityIps, GeneratedVerificationSdpOffer, GeneratedVerificationSdpAnswer, GeneratedSdpOffer, GeneratedSdpAnswer>;
 
 public:
     bool defer(Event e);
 
 private:
     // event handlers
-    void handle_event(OnRelease&&);
+    void handle_event(Erase&&);
+    void handle_event(RegisterConnection&&);
     void handle_event(OnProcessConnection&&);
     void handle_event(StateUpdate&&);
+    void handle_event(SignedSnapshotCb&&);
     void handle_event(PeersCb&&);
     void handle_event(SyncedCb&&);
-    void handle_event(SignedSnapshotCb&&);
     void handle_event(stage_operation::Result&&);
     void handle_event(OnForwardBlockrep&&);
-    void handle_event(OnFailedAddressEvent&&);
     void handle_event(InspectorCb&&);
     void handle_event(GetHashrate&&);
     void handle_event(GetHashrateChart&&);
-    void handle_event(OnPinAddress&&);
-    void handle_event(OnUnpinAddress&&);
+    void handle_event(FailedConnect&&);
     void handle_event(mempool::Log&&);
+    void handle_event(StartTimer&&);
+    void handle_event(CancelTimer&&);
+    void handle_event(RTCClosed&&);
+    void handle_event(IdentityIps&&);
+    void handle_event(GeneratedVerificationSdpOffer&&);
+    void handle_event(GeneratedVerificationSdpAnswer&&);
+    void handle_event(GeneratedSdpOffer&&);
+    void handle_event(GeneratedSdpAnswer&&);
 
     // chain updates
     using Append = chainserver::state_update::Append;
@@ -253,11 +334,13 @@ private:
     ////////////////////////
     // convenience functions
     const ConsensusSlave& consensus() { return chains.consensus_state(); }
+    tl::expected<Conref, int32_t> try_register(RegisterConnection&&);
 
     ////////////////////////
     // register sync state
-
     void update_sync_state();
+
+    void set_scheduled_connect_timer();
 
 private: // private data
     //
@@ -266,7 +349,7 @@ private: // private data
     StageAndConsensus chains;
     mempool::Mempool mempool; // copy of chainserver mempool
 
-    address_manager::AddressManager connections;
+    AddressManager connections;
 
     Timer timer;
     std::optional<Timer::iterator> wakeupTimer;

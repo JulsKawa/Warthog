@@ -17,25 +17,17 @@ struct LeaderInfo {
 
 struct VerifierNode;
 using VerifierMap = std::map<Header, VerifierNode, HeaderView::HeaderComparator>;
-struct RequestNode;
-using RequestMap = std::map<Header, RequestNode>;
 using Ver_iter = VerifierMap::iterator;
-using Req_iter = RequestMap::iterator;
-using Variant = std::variant<std::monostate, Req_iter, Ver_iter>;
 
 struct ReqData;
 struct RequestNode {
-    RequestNode()
-    {
-    }
-
-    Conref cr;
+    std::optional<Conref> cr;
     uint64_t originId;
     Batch batch;
 
     // methods
     bool filled() const { return batch.size() > 0; }
-    bool pending() const { return cr.valid(); }
+    bool pending() const { return cr.has_value(); }
 };
 
 struct LeaderNode;
@@ -45,9 +37,9 @@ using Lead_set = std::set<Lead_iter>;
 
 inline bool operator<(const Lead_iter& l1, const Lead_iter& l2)
 {
-    static_assert(sizeof(uint64_t) == sizeof(l1));
-    return *reinterpret_cast<const uint64_t*>(&l1) < *reinterpret_cast<const uint64_t*>(&l2);
+    return &*l1< &*l2;
 }
+
 struct NonzeroSnapshot {
     NonzeroSnapshot(std::shared_ptr<Descripted>);
     std::shared_ptr<Descripted> descripted;
@@ -64,22 +56,20 @@ struct VerifierNode {
 };
 inline bool operator<(const Ver_iter& l1, const Ver_iter& l2)
 {
-    static_assert(sizeof(uint64_t) == sizeof(l1));
-    return *reinterpret_cast<const uint64_t*>(&l1) < *reinterpret_cast<const uint64_t*>(&l2);
+    return &*l1< &*l2;
 }
 struct QueueBatchNode {
-    Conref cr;
+    std::optional<Conref> cr;
     uint64_t originId;
     Batch batch;
     Lead_set leaderRefs;
     std::vector<Conref> probeRefs;
-    bool has_pending_request() { return cr.valid(); }
+    bool has_pending_request() { return cr.has_value(); }
 };
 using Queued_iter = std::map<Header, QueueBatchNode>::iterator;
 inline bool operator<(const Queued_iter& l1, const Queued_iter& l2)
 {
-    static_assert(sizeof(uint64_t) == sizeof(l1));
-    return *reinterpret_cast<const uint64_t*>(&l1) < *reinterpret_cast<const uint64_t*>(&l2);
+    return &*l1< &*l2;
 }
 
 struct QueueEntry {
@@ -217,7 +207,6 @@ private:
 
     void find(HeaderView hv);
     std::pair<Lead_set, Lead_set> split_leaders(const Lead_set& leaders, HeaderView h, size_t batchIndex);
-    void process_req_iter(Req_iter, std::vector<Offender>&);
 
 public:
     [[nodiscard]] bool is_active() const
@@ -258,7 +247,7 @@ private:
 
     void process_final(Lead_iter, std::vector<Offender>& out);
 
-    Conref try_send(ConnectionFinder& cf, std::vector<ChainOffender> close, const ReqData&);
+    std::optional<Conref> try_send(ConnectionFinder& cf, std::vector<ChainOffender> close, const ReqData&);
     bool try_final_request(Lead_iter, RequestSender& s);
 
     std::vector<ChainOffender> filter_leadermismatch_offenders(std::vector<Offender>);

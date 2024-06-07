@@ -153,14 +153,14 @@ void HTTPEndpoint::work()
     get("/account/richlist", get_account_richlist);
 
     indexGenerator.section("Peers Endpoints");
-    get("/peers/ip_count", inspect_conman, jsonmsg::ip_counter);
+    // get("/peers/ip_count", inspect_conman, jsonmsg::ip_counter); // TODO
     get("/peers/banned", get_banned_peers);
     get("/peers/unban", unban_peers, true);
     get_1("/peers/offenses/:page", get_offenses);
     get("/peers/connected", get_connected_peers2, true);
     get("/peers/connected/connection", get_connected_connection);
-    get("/peers/endpoints", inspect_eventloop, jsonmsg::endpoints, true);
-    get("/peers/connect_timers", inspect_eventloop, jsonmsg::connect_timers, true);
+    // get("/peers/endpoints", inspect_eventloop, jsonmsg::endpoints, true);
+    // get("/peers/connect_timers", inspect_eventloop, jsonmsg::connect_timers, true);
 
     indexGenerator.section("Tools Endpoints");
     get_1("/tools/encode16bit/from_e8/:feeE8", get_round16bit_e8);
@@ -178,11 +178,11 @@ void HTTPEndpoint::work()
                                            ws->subscribe(API::Rollback::WEBSOCKET_EVENT);
                                        },
                                    });
-    app.listen(bind.ipv4.to_string(), bind.port, std::bind(&HTTPEndpoint::on_listen, this, _1));
+    app.listen(bind.ip.to_string(), bind.port, std::bind(&HTTPEndpoint::on_listen, this, _1));
     lc.loop->run();
 }
 
-std::optional<HTTPEndpoint> HTTPEndpoint::make_public_endpoint(const Config&)
+std::optional<HTTPEndpoint> HTTPEndpoint::make_public_endpoint(const ConfigParams&)
 {
     auto& pAPI { config().publicAPI };
     if (!pAPI)
@@ -190,13 +190,12 @@ std::optional<HTTPEndpoint> HTTPEndpoint::make_public_endpoint(const Config&)
     return std::optional<HTTPEndpoint> { std::in_place, pAPI->bind, true };
 };
 
-HTTPEndpoint::HTTPEndpoint(EndpointAddress bind, bool isPublic)
+HTTPEndpoint::HTTPEndpoint(TCPSockaddr bind, bool isPublic)
     : bind(bind)
     , isPublic(isPublic)
     , app(lc.loop)
 {
     spdlog::info("RPC {}endpoint is {}.", isPublic ? "public " : "", bind.to_string());
-    t = std::thread(&HTTPEndpoint::work, this);
 }
 
 void HTTPEndpoint::get(std::string pattern, auto asyncfun, auto serializer, bool priv)

@@ -1,10 +1,12 @@
 #pragma once
 
 #include "block/chain/worksum.hpp"
+#include "general/byte_order.hpp"
 #include "general/errors.hpp"
 #include "view.hpp"
-#include "general/byte_order.hpp"
+#include <optional>
 #include <span>
+#include <vector>
 
 // inline funcitons for access
 inline uint64_t readuint64(const uint8_t* pos)
@@ -73,17 +75,25 @@ public:
         static_assert(sizeof(uint16_t) == 2);
         return ntoh16(read<uint16_t>());
     }
-    operator uint16_t()
+    uint8_t uint8()
     {
-        return uint16();
+        return read<uint8_t>();
+    }
+    operator uint64_t()
+    {
+        return uint64();
     }
     operator uint32_t()
     {
         return uint32();
     }
-    uint8_t uint8()
+    operator uint16_t()
     {
-        return read<uint8_t>();
+        return uint16();
+    }
+    operator uint8_t()
+    {
+        return uint8();
     }
     template <size_t N>
     View<N> view()
@@ -92,11 +102,24 @@ public:
         skip(N);
         return v;
     }
+
     template <size_t N>
     operator View<N>()
     {
         return view<N>();
     }
+
+    struct Optional {
+        Reader& r;
+        template <typename T>
+        operator std::optional<T>()
+        {
+            if (r.uint8())
+                return T { r };
+            return {};
+        }
+    };
+    Optional optional() { return { *this }; }
     template <typename T, size_t N = T::size()>
     requires std::derived_from<T, View<N>>
     [[nodiscard]] T view()
@@ -117,16 +140,28 @@ public:
         }
         return Worksum(arr);
     }
-    std::span<const uint8_t> take_span(size_t len){
+    operator Worksum()
+    {
+        return worksum();
+    }
+    std::span<const uint8_t> take_span(size_t len)
+    {
         auto p = pos;
         skip(len);
         return { p, len };
+    }
+    std::string_view take_string_view(size_t len)
+    {
+        auto p = pos;
+        skip(len);
+        return { (const char*)p, len };
     }
     std::span<const uint8_t> span()
     {
         return take_span(uint32());
     }
-    std::span<const uint8_t> rest(){
+    std::span<const uint8_t> rest()
+    {
         return take_span(remaining());
     };
 
