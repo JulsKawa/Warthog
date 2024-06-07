@@ -1,6 +1,7 @@
 name: cloudflare
 on:
     workflow_call:
+    workflow_dispatch:
     repository_dispatch:
         types: [cloudflare]
       
