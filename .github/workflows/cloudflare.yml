@@ -1,8 +1,7 @@
 name: cloudflare
 on:
-    workflow_call:
-    repository_dispatch:
-        types: [cloudflare]
+    workflow_dispatch:
+
       
 jobs:
   build:
