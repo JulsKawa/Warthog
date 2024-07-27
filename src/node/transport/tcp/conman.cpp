@@ -5,7 +5,7 @@
 #include "uvw.hpp"
 #include <memory>
 namespace {
-[[nodiscard]] std::optional<TCPSockaddr> get_ipv4_endpoint(const uvw::tcp_handle& handle)
+[[nodiscard]] std::optional<TCPPeeraddr> get_ipv4_endpoint(const uvw::tcp_handle& handle)
 {
     sockaddr_storage storage;
     int alen = sizeof(storage);
@@ -13,7 +13,7 @@ namespace {
     if (storage.ss_family != AF_INET)
         return {};
     sockaddr_in* addr_i4 = (struct sockaddr_in*)&storage;
-    return TCPSockaddr(IPv4(ntoh32(uint32_t(addr_i4->sin_addr.s_addr))), addr_i4->sin_port);
+    return TCPPeeraddr(IPv4(ntoh32(uint32_t(addr_i4->sin_addr.s_addr))), addr_i4->sin_port);
 }
 }
 
@@ -56,7 +56,7 @@ TCPConnectionManager::TCPConnectionManager(std::shared_ptr<uvw::loop> loop, Peer
         if (endpoint) {
             auto connectRequest { TCPConnectRequest::make_inbound(*endpoint) };
             auto connection { insert_connection(tcpHandle, connectRequest).shared_from_this() };
-            ps.authenticate(connection);
+            ps.authenticate_inbound(endpoint.value().ip, TransportType::TCP, connection);
         }
     });
     wakeup = loop->resource<uvw::async_handle>();
@@ -97,7 +97,18 @@ void TCPConnectionManager::handle_event(GetPeers&& e)
 
 void TCPConnectionManager::handle_event(Connect&& c)
 {
-    connect_internal(c);
+    TCPConnectRequest& r { c };
+    connection_log().info("{} connecting ", r.address().to_string()); // TODO: do connection_log
+    auto& loop { listener->parent() };
+    auto tcp { loop.resource<uvw::tcp_handle>() };
+    auto err { tcp->connect(r.address().sock_addr()) };
+    if (err) {
+        global().core->on_failed_connect(r, Error(err));
+        return;
+    }
+    auto& connection { insert_connection(tcp, r) };
+    global().peerServer->log_outbound(c.address().ip, connection.shared_from_this());
+    connection.start_read();
 }
 
 void TCPConnectionManager::handle_event(Inspect&& e)
@@ -119,18 +130,4 @@ void TCPConnectionManager::shutdown(int32_t reason)
     listener->close();
     for (auto& c : tcpConnections)
         c->close_internal(reason);
-}
-
-void TCPConnectionManager::connect_internal(const TCPConnectRequest& r)
-{
-    connection_log().info("{} connecting ", r.address.to_string()); // TODO: do connection_log
-    auto& loop { listener->parent() };
-    auto tcp { loop.resource<uvw::tcp_handle>() };
-    auto err { tcp->connect(r.address.sock_addr()) };
-    if (err) {
-        global().core->on_failed_connect(r, Error(err));
-        return;
-    }
-    auto& connection { insert_connection(tcp, r) };
-    connection.start_read();
 }

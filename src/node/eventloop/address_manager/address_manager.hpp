@@ -1,6 +1,12 @@
 #pragma once
+#ifndef DISABLE_LIBUV
+#include "tcp_connections.hpp"
+#else
+#include "websocket_outbound_schedule.hpp"
+#endif
+
+#include "init_arg.hpp"
 #include "../types/conndata.hpp"
-#include "connection_schedule.hpp"
 #include "expected.hpp"
 #include "transport/helpers/per_ip_counter.hpp"
 #include <chrono>
@@ -8,23 +14,25 @@
 #include <set>
 #include <vector>
 class Conref;
-class TCPConnection;
 struct Inspector;
-
 
 class AddressManager {
     using time_point = std::chrono::steady_clock::time_point;
 
 public:
     friend struct ::Inspector;
-    using InitArg = connection_schedule::InitArg;
-
+    using InitArg = address_manager::InitArg;
+    struct OutboundClosedEvent {
+        OutboundClosedEvent( std::shared_ptr<ConnectionBase> c, int32_t reason);
+        std::shared_ptr<ConnectionBase> c;
+        int32_t reason;
+    };
 private:
     class ConrefIter : public Coniter {
     public:
         Conref operator*() { return Conref { *this }; }
     };
-    struct All {
+    struct AllRange {
         const AddressManager& ref;
         struct End {
         };
@@ -59,7 +67,7 @@ private:
         auto end() const { return End {}; }
         bool empty() { return begin() == end(); };
     };
-    struct Initialized {
+    struct InitializedRange {
         const AddressManager& ref;
         struct End {
         };
@@ -100,26 +108,21 @@ public:
     // public methods
 
     // constructor
-    AddressManager(connection_schedule::InitArg);
+    AddressManager(InitArg);
     void start();
 
     // for range-based access
-    Initialized initialized() const { return { *this }; }
-    All all() const { return { *this }; }
+    InitializedRange initialized() const { return { *this }; }
+    AllRange all() const { return { *this }; }
 
     void outbound_failed(const ConnectRequest& r);
-    void verify(std::vector<TCPSockaddr>, IPv4 source); // TODO call this function
+    void outbound_closed(OutboundClosedEvent);
 
-    // access by connection Id
+    void verify(std::vector<TCPPeeraddr>, IPv4 source); // TODO call this function
     [[nodiscard]] std::optional<Conref> find(uint64_t id) const;
-
     size_t size() const { return conndatamap.size(); }
-
     size_t ip_count(const IP& ip) const { return ipCounter.count(ip); };
-    // erase/insert
     bool erase(Conref); // returns whether is pinned
-    // [[nodiscard]] tl::expected<std::optional<Conref>, int32_t> prepare_insert(const ConnectionBase::ConnectionVariant&);
-    // Conref insert_prepared(const std::shared_ptr<ConnectionBase>&, HeaderDownload::Downloader&, BlockDownload::Downloader&, Timer&);
 
     struct InsertData {
         ConnectionBase::ConnectionVariant& convar;
@@ -130,17 +133,12 @@ public:
     };
     auto insert(InsertData) -> tl::expected<Conref, int32_t>;
 
-    // access queued
-
-    // template <typename T>
-    // [[nodiscard]] std::vector<T> sample_verified(size_t N)
-    // {
-    //     return connectionSchedule.sample_verified<T>(N);
-    // }
-    auto sample_verified(size_t N)
+#ifndef DISABLE_LIBUV
+    auto sample_verified_tcp(size_t N)
     {
-        return connectionSchedule.sample_verified(N);
+        return tcpConnectionSchedule.sample_verified(N);
     }
+#endif
 
     void garbage_collect();
 
@@ -148,18 +146,20 @@ public:
     [[nodiscard]] std::optional<time_point> pop_scheduled_connect_time();
 
 private:
-    // [[nodiscard]] tl::expected<std::optional<Conref>, int32_t> prepare_insert(const std::shared_ptr<TCPConnection>&);
-    // [[nodiscard]] tl::expected<std::optional<Conref>, int32_t> prepare_insert(const std::shared_ptr<WSConnection>&);
-    // [[nodiscard]] tl::expected<std::optional<Conref>, int32_t> prepare_insert(const std::shared_ptr<RTCConnection>&);
-    bool is_own_endpoint(Sockaddr a);
+    bool is_own_endpoint(Peeraddr a);
     std::optional<Conref> eviction_candidate() const;
 
-private:
-    // data
+#ifndef DISABLE_LIBUV
+#endif
 
-    std::vector<Sockaddr> outboundEndpoints;
+private:
+    std::vector<Peeraddr> outboundEndpoints;
     std::vector<Conref> inboundConnections;
-    ConnectionSchedule connectionSchedule;
+#ifndef DISABLE_LIBUV
+    TCPConnectionSchedule tcpConnectionSchedule;
+#else 
+    WSConnectionSchedule wsConnectionSchedule;
+#endif
 
     mutable Conndatamap conndatamap;
     std::vector<Conref> delayedDelete;

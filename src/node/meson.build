@@ -1,20 +1,21 @@
 src_libuv = [
+  './api/http/endpoint.cpp',
+  './eventloop/address_manager/tcp_connections.cpp',
   './transport/tcp/conman.cpp',
   './transport/tcp/connect_request.cpp',
   './transport/tcp/connection.cpp',
-  './transport/tcp/start_connection.cpp',
-  './transport/ws/native/start_connection.cpp',
-  './transport/ws/native/conman.cpp',
+  './transport/ws/native/ws_conman.cpp',
   './transport/ws/native/connection.cpp',
   './transport/ws/native/ws_session.cpp',
-  './api/http/endpoint.cpp',
   ]
 
 src_browser = [
-  './transport/ws/browser/start_connection.cpp',
-  './transport/ws/browser/connection.cpp',
-  './config/browser.cpp',
   './api/wasm/api.cpp',
+  './config/browser.cpp',
+  './eventloop/address_manager/websocket_outbound_schedule.cpp',
+  './transport/ws/browser/connect_request.cpp',
+  './transport/ws/browser/connection.cpp',
+  './transport/ws/browser/ws_urladdr.cpp',
   ]
 
 src= [
@@ -53,8 +54,6 @@ src= [
   './communication/messages.cpp',
   './config/config.cpp',
   './eventloop/address_manager/address_manager.cpp',
-  './eventloop/address_manager/connection_schedule.cpp',
-  './eventloop/address_manager/flat_address_set.cpp',
   './eventloop/chain_cache.cpp',
   './eventloop/eventloop.cpp',
   './eventloop/peer_chain.cpp',
@@ -85,13 +84,13 @@ src= [
   './transport/helpers/ip.cpp',
   './transport/helpers/ipv4.cpp',
   './transport/helpers/ipv6.cpp',
+  './transport/helpers/peer_addr.cpp',
   './transport/helpers/per_ip_counter.cpp',
-  './transport/helpers/socket_addr.cpp',
+  './transport/helpers/sockaddr.cpp',
   './transport/helpers/tcp_sockaddr.cpp',
   './transport/webrtc/connection.cpp',
   './transport/webrtc/sdp_util.cpp',
   './transport/webrtc/webrtc_sockaddr.cpp',
-  './transport/ws/connect_request.cpp',
   src_sqlitecpp,
   src_wh,
 ]
@@ -114,10 +113,10 @@ if get_option('emscripten')
 
 link_args = [
     '-lwebsocket.js',
-    '-sNO_DISABLE_EXCEPTION_CATCHING', '-sSTACK_SIZE=10mb', '-fexceptions', '-sPROXY_TO_PTHREAD', '-sWASMFS',
+    '-sNO_DISABLE_EXCEPTION_CATCHING', '-sSTACK_SIZE=4mb', '-sMAXIMUM_MEMORY=768mb', '-fexceptions', '-sPROXY_TO_PTHREAD', '-sWASMFS',
     '-sUSE_CLOSURE_COMPILER=0', '-sIMPORTED_MEMORY',
     '-sWASM_BIGINT=1', '-sMODULARIZE', '-sDYNAMIC_EXECUTION=0', '-sNO_POLYFILL',
-    '-sSTRICT_JS=0', '-sALLOW_MEMORY_GROWTH', '-sINITIAL_MEMORY=16777216', '-sSTACK_SIZE=2048KB', '-sGLOBAL_BASE=4096', '-sALLOW_TABLE_GROWTH',
+    '-sSTRICT_JS=0', '-sALLOW_MEMORY_GROWTH', '-sINITIAL_MEMORY=8388608', '-sGLOBAL_BASE=4096', '-sALLOW_TABLE_GROWTH',
     '-sERROR_ON_UNDEFINED_SYMBOLS=1', '-sENVIRONMENT=web,worker',
     '-sWASMFS', '-sPTHREAD_POOL_SIZE=1', '-sLLD_REPORT_UNDEFINED', '-sEXPORT_ES6', '-sUSE_ES6_IMPORT_META',
   ]

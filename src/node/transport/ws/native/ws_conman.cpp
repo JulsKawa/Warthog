@@ -1,7 +1,8 @@
-#include "conman.hpp"
+#include "ws_conman.hpp"
 #include "config/types.hpp"
 #include "eventloop/eventloop.hpp"
 #include "global/globals.hpp"
+#include "transport/helpers/sockaddr.hpp"
 #include "transport/ws/native/connection.hpp"
 #include "ws_session.hpp"
 #include <cassert>
@@ -14,6 +15,32 @@
 
 extern "C" {
 #include "libwebsockets.h"
+}
+namespace {
+
+std::optional<IP> forwarded_for(lws* wsi)
+{
+    if (int i { lws_hdr_total_length(wsi, WSI_TOKEN_X_FORWARDED_FOR) }; i >= 0) {
+        size_t len(i);
+        std::string ip;
+        ip.resize(len + 1);
+        assert(lws_hdr_copy(wsi, ip.data(), ip.size(), WSI_TOKEN_X_FORWARDED_FOR) != -1);
+        ip.resize(len);
+        return IP::parse(ip);
+    }
+    return {};
+}
+std::optional<Sockaddr> peer_ip_port(lws* wsi)
+{
+    auto fd { lws_get_socket_fd(wsi) };
+    assert(fd > 0);
+    sockaddr_storage sa;
+    socklen_t len(sizeof(sa));
+    int r(getpeername(fd, (sockaddr*)&sa, &len));
+    if (r != 0)
+        return {};
+    return Sockaddr::from_sockaddr_storage(sa);
+}
 }
 using namespace std;
 WSConnectionManager::WSConnectionManager(PeerServer& peerServer, WebsocketServerConfig cfg)
@@ -53,41 +80,46 @@ static int libwebsocket_callback(struct lws* wsi,
           };
 
     switch (reason) {
-
     case LWS_CALLBACK_FILTER_NETWORK_CONNECTION:
         break;
     case LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED: { // called on incoming
-        auto fd { lws_get_socket_fd(wsi) };
-        // lws_get_peer_addresses()
-        assert(fd > 0);
-        sockaddr_storage sa;
-        socklen_t len(sizeof(sa));
-        int r(getpeername(fd, (sockaddr*)&sa, &len));
-        if (r != 0 || sa.ss_family != AF_INET) {
-            return -1;
-        }
-
-        lws_rx_flow_control(wsi, 0);
-        // lws_get_peer_addresses()
-        sockaddr_in* addr_i4 = (struct sockaddr_in*)&sa;
-        WSSockaddr wsaddr(IPv4(ntoh32(uint32_t(addr_i4->sin_addr.s_addr))), addr_i4->sin_port);
-        auto p {
-            new std::shared_ptr<WSSession>(WSSession::make_new(false, wsi))
-        };
-        lws_set_opaque_user_data(wsi, p);
-        auto& session { *p };
-        session->connection = WSConnection::make_new(session, WSConnectRequest::make_inbound(wsaddr), conman());
-        global().peerServer->authenticate(session->connection);
     } break;
     case LWS_CALLBACK_WSI_CREATE:
         break;
     case LWS_CALLBACK_PROTOCOL_INIT:
         break;
 
-    case LWS_CALLBACK_ESTABLISHED:
-    case LWS_CALLBACK_CLIENT_ESTABLISHED:
+    case LWS_CALLBACK_FILTER_HTTP_CONNECTION:
+        return -1; // Do not allow plain HTTP
+    case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE: {
+        lws_rx_flow_control(wsi, 0);
+        auto ipport = peer_ip_port(wsi);
+        if (!ipport) // cannot extract peer info
+            return -1;
+        auto& cm { conman() };
+        auto& sockaddr = *ipport;
+        if (cm.config.XFowarded) {
+            auto fIp { forwarded_for(wsi) };
+            if (!fIp)
+                return -1;
+            sockaddr.ip =  *fIp; // overwrite with real IP
+        }
+        spdlog::info("Incoming websocket connection from IP: {}", sockaddr.ip.to_string());
+
+        WSPeeraddr wsaddr(sockaddr);
+        auto p {
+            new std::shared_ptr<WSSession>(WSSession::make_new(false, wsi))
+        };
+        lws_set_opaque_user_data(wsi, p);
+        auto& session { *p };
+        session->connection = WSConnection::make_new(session, WSConnectRequest::make_inbound(wsaddr), conman());
+        global().peerServer->authenticate_inbound(sockaddr.ip, TransportType::Websocket, session->connection);
         psession()->on_connected();
         lws_callback_on_writable(wsi);
+        break;
+    }
+    case LWS_CALLBACK_ESTABLISHED:
+    case LWS_CALLBACK_CLIENT_ESTABLISHED:
         break;
 
     case LWS_CALLBACK_SERVER_WRITEABLE:
@@ -121,35 +153,35 @@ void WSConnectionManager::handle_event(Shutdown&&)
     _shutdown = true;
 }
 
-void WSConnectionManager::handle_event(Connect&& c)
-{
-    auto& cr { c.conreq };
-    auto ipstr { cr.address.ip.to_string() };
-
-    struct lws_client_connect_info i;
-    memset(&i, 0, sizeof(i));
-
-    i.context = context;
-    i.port = cr.address.port;
-    i.address = ipstr.c_str();
-    i.path = "/";
-    i.host = i.address;
-    i.origin = "";
-    i.ssl_connection = 0;
-    i.protocol = "binary";
-    i.local_protocol_name = "binary";
-
-    auto* p = new std::shared_ptr<WSSession>(WSSession::make_new(false));
-    auto& session { *p };
-    i.pwsi = &(session->wsi);
-    i.opaque_user_data = p;
-
-    if (!lws_client_connect_via_info(&i)) {
-        global().core->on_failed_connect(c.conreq, Error(ESTARTWEBSOCK));
-        return;
-    }
-    session->connection = WSConnection::make_new(session, c.conreq, *this);
-};
+// void WSConnectionManager::handle_event(Connect&& c)
+// {
+//     auto& cr { c.conreq };
+//     auto ipstr { cr.address.ip().to_string() };
+//
+//     struct lws_client_connect_info i;
+//     memset(&i, 0, sizeof(i));
+//
+//     i.context = context;
+//     i.port = cr.address.port();
+//     i.address = ipstr.c_str();
+//     i.path = "/";
+//     i.host = i.address;
+//     i.origin = "";
+//     i.ssl_connection = 0;
+//     i.protocol = "binary";
+//     i.local_protocol_name = "binary";
+//
+//     auto* p = new std::shared_ptr<WSSession>(WSSession::make_new(false));
+//     auto& session { *p };
+//     i.pwsi = &(session->wsi);
+//     i.opaque_user_data = p;
+//
+//     if (!lws_client_connect_via_info(&i)) {
+//         global().core->on_failed_connect(c.conreq, Error(ESTARTWEBSOCK));
+//         return;
+//     }
+//     session->connection = WSConnection::make_new(session, c.conreq, *this);
+// };
 
 void WSConnectionManager::handle_event(Send&& s)
 {
@@ -227,6 +259,8 @@ void WSConnectionManager::create_context()
     struct lws_context_creation_info info;
     memset(&info, 0, sizeof info); /* otherwise uninitialized garbage */
     info.port = config.port;
+    if (config.bindLocalhost)
+        info.iface = "lo";
     info.protocols = protocols;
     info.pvo = &pvo;
     info.user = this;

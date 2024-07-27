@@ -44,7 +44,8 @@ std::string ConnectionBase::to_string() const
     return "(" + std::to_string(id) + ")" + (inbound() ? "IN" : "OUT") + peer_addr().to_string();
 }
 
-std::string_view ConnectionBase::type_str() const{
+std::string_view ConnectionBase::type_str() const
+{
     return peer_addr().type_str();
 }
 
@@ -106,6 +107,7 @@ std::span<uint8_t> ConnectionBase::process_message(std::span<uint8_t>, std::mono
 {
     assert(false); // this should not happen because on_connected should be called first
 }
+
 std::span<uint8_t> ConnectionBase::process_message(std::span<uint8_t> data, HandshakeState& p)
 {
     auto r { p.remaining(inbound()) };
@@ -179,9 +181,11 @@ void ConnectionBase::send(Sndbuffer&& msg)
 
 void ConnectionBase::on_close(const CloseState& cs)
 {
-    global().core->erase(get_shared());
+    global().core->erase(get_shared(), cs.error);
     // l->async_register_close(peerAddress.ipv4, errcode, logrow); // TODO: logrow
     global().peerServer->async_register_close(get_shared(), cs.error); // TODO: use failed outbound
+    if (!inbound())
+        global().core->on_outbound_closed(get_shared(), cs.error);
 }
 
 auto HandshakeState::parse(bool inbound) -> Parsed

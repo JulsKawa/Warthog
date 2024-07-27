@@ -1,5 +1,5 @@
 #include "connection.hpp"
-#include "transport/helpers/socket_addr.hpp"
+#include "transport/helpers/peer_addr.hpp"
 #include "eventloop/eventloop.hpp"
 #include "general/is_testnet.hpp"
 #include "global/globals.hpp"
@@ -58,7 +58,7 @@ void TCPConnection::close_internal(int errcode)
     if (tcpHandle->closing())
         return;
     tcpHandle->close();
-    connection_log().info("a{}b closed: {} ({})",
+    connection_log().info("{} closed: {} ({})",
         to_string(), errors::err_name(errcode), errors::strerror(errcode));
     on_close({
         .error = errcode,
@@ -77,11 +77,11 @@ void TCPConnection::async_send(std::unique_ptr<char[]> data, size_t size)
     });
 }
 
-TCPSockaddr TCPConnection::claimed_peer_addr() const
+TCPPeeraddr TCPConnection::claimed_peer_addr() const
 {
     if (inbound()) {
         // on inbound connection take the port the peer claims to listen on
-        return { TCPSockaddr { peer_addr_native().ip, asserted_port() } };
+        return { TCPPeeraddr { peer_addr_native().ip, asserted_port() } };
     } else {
         // on outbound connection the port is the correct peer endpoint port
         return peer_addr_native();

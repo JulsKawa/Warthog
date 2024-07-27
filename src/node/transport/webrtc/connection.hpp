@@ -62,7 +62,6 @@ public:
     RTCConnection(bool isInbound, uint64_t verificationConId, std::weak_ptr<Eventloop>, IP ip, variant_t data);
     RTCConnection(const RTCConnection&) = delete;
     RTCConnection(RTCConnection&&) = delete;
-    virtual bool is_native() const override { return true; }
     std::shared_ptr<ConnectionBase> get_shared() override
     {
         return shared_from_this();
@@ -80,7 +79,8 @@ public:
     {
         return weak_from_this();
     }
-    Sockaddr peer_addr() const override { return { sockAddr }; }
+    Peeraddr peer_addr() const override { return { sockAddr }; }
+    auto& native_peer_addr() const { return sockAddr ; }
     // RTCSockaddr connection_peer_addr_native() const ;
     // { return connectRequest.address; }
     bool inbound() const override { return isInbound; };
@@ -103,7 +103,7 @@ private: // maybe proxied functions
 private:
     bool isInbound;
     uint64_t verificationConId { 0 }; // Nonzero specifies connection id of peer this RTC connection is verifying.
-    WebRTCSockaddr sockAddr;
+    WebRTCPeeraddr sockAddr;
     std::weak_ptr<Eventloop> eventloop;
 
     variant_t data;

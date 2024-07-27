@@ -5,7 +5,7 @@
 #include "conman.hpp"
 #include "eventloop/types/conref_declaration.hpp"
 
-class TCPConnection final : public IPv4Connection, public std::enable_shared_from_this<TCPConnection> {
+class TCPConnection final : public AuthenticatableConnection, public std::enable_shared_from_this<TCPConnection> {
 
     friend class TCPConnectionManager;
 
@@ -22,7 +22,7 @@ public:
         std::shared_ptr<uvw::tcp_handle> handle, const TCPConnectRequest& r, TCPConnectionManager& conman);
     TCPConnection(const TCPConnection&) = delete;
     TCPConnection(TCPConnection&&) = delete;
-    virtual bool is_native() const override { return true; }
+    virtual bool is_tcp() const override { return true; }
     std::shared_ptr<ConnectionBase> get_shared() override
     {
         return shared_from_this();
@@ -36,13 +36,9 @@ public:
         return weak_from_this();
     }
 
-    IPv4 peer_ipv4() const override
-    {
-        return peer_addr_native().ip;
-    }
-    TCPSockaddr claimed_peer_addr() const;
-    Sockaddr peer_addr() const override { return { peer_addr_native() }; }
-    TCPSockaddr peer_addr_native() const { return connectRequest.address; }
+    TCPPeeraddr claimed_peer_addr() const;
+    Peeraddr peer_addr() const override { return { peer_addr_native() }; }
+    TCPPeeraddr peer_addr_native() const { return connectRequest.address(); }
     bool inbound() const override;
 
 private:

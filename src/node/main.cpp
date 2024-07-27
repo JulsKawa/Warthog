@@ -6,8 +6,7 @@
 #include "global/globals.hpp"
 #include "peerserver/peerserver.hpp"
 #include "spdlog/spdlog.h"
-#include "transport/ws/native/conman.hpp"
-#include "transport/ws/start_connection.hpp"
+#include "transport/ws/native/ws_conman.hpp"
 
 #ifdef DISABLE_LIBUV
 #include "config/browser.hpp"
@@ -148,20 +147,6 @@ int main(int argc, char** argv)
     ps.start();
     cs->start();
     el->start();
-#ifdef DISABLE_LIBUV
-    auto wsPeers { ws_peers() };
-    wsPeers.push_back("127.0.0.1:10001");
-    spdlog::info("WS Peer size: {}", wsPeers.size());
-
-    for (auto& p : wsPeers) {
-        spdlog::info("WS Peer: {}", p);
-        auto a { WSSockaddr::parse(p) };
-        if (a) {
-            WSSockaddr addr { a.value() };
-            start_connection(make_request(addr, std::chrono::seconds(1)));
-        }
-    }
-#endif
 
 #ifdef DISABLE_LIBUV
     while (true) {

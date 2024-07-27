@@ -91,7 +91,7 @@ struct Inspector {
 
 namespace {
 template <typename T>
-json verified_json(const std::map<TCPSockaddr, T>& map)
+json verified_json(const std::map<TCPPeeraddr, T>& map)
 {
     using namespace std::chrono;
     auto now = steady_clock::now();
@@ -139,10 +139,15 @@ json grid_json(const Grid& g)
 
 json header_json(const Header& header, NonzeroHeight height)
 {
-    auto verusHash { verus_hash(header) };
+    auto version { header.version() };
+    const bool testnet { is_testnet() };
+    auto powVersion { POWVersion::from_params(height, version, testnet) };
+    assert(powVersion.has_value());
+    bool verusV2_2 { powVersion->uses_verus_2_2() };
+    auto verusHash { verusV2_2 ? verus_hash_v2_2(header) : verus_hash_v2_1(header) };
     auto blockHash { header.hash() };
     auto sha256tHash { hashSHA256(blockHash) };
-    auto target { header.target(height, is_testnet()) };
+    auto target { header.target(height, testnet) };
     uint32_t targetBE = hton32(target.binary());
     json h;
     h["raw"] = serialize_hex(header.data(), header.size());
@@ -152,6 +157,7 @@ json header_json(const Header& header, NonzeroHeight height)
     h["difficulty"] = target.difficulty();
     h["hash"] = serialize_hex(header.hash());
     h["pow"] = json {
+        { "verusV2.2", verusV2_2 },
         { "hashVerus", serialize_hex(verusHash) },
         { "hashSha256t", serialize_hex(sha256tHash) },
         { "floatVerus", CustomFloat(verusHash).to_double() },
@@ -160,7 +166,7 @@ json header_json(const Header& header, NonzeroHeight height)
     h["merkleroot"] = serialize_hex(header.merkleroot());
     h["nonce"] = serialize_hex(header.nonce());
     h["prevHash"] = serialize_hex(header.prevhash());
-    h["version"] = serialize_hex(header.version());
+    h["version"] = serialize_hex(version);
     return h;
 }
 
@@ -284,14 +290,14 @@ json to_json(const API::MiningState& ms)
     auto height { mt.block.height };
     auto bodyView { mt.block.body_view() };
     auto blockReward { bodyView.reward() };
-    auto totalTxFee { bodyView.fee_sum() };
+    auto totalTxFee { bodyView.fee_sum_assert() };
     j["synced"] = ms.synced;
     j["header"] = serialize_hex(mt.block.header);
     j["difficulty"] = mt.block.header.target(height, is_testnet()).difficulty();
     j["merklePrefix"] = serialize_hex(bodyView.merkle_prefix());
     j["body"] = serialize_hex(mt.block.body.data());
-    j["blockReward"] = blockReward.amount().to_string();
-    j["blockRewardE8"] = blockReward.amount().E8();
+    j["blockReward"] = blockReward.amount_assert().to_string();
+    j["blockRewardE8"] = blockReward.amount_assert().E8();
     j["totalTxFee"] = totalTxFee.to_string();
     j["totalTxFeeE8"] = totalTxFee.E8();
     j["height"] = height;
@@ -327,7 +333,7 @@ json to_json(const API::Transaction& tx)
         tx);
 }
 
-json to_json(const Sockaddr& ea)
+json to_json(const Peeraddr& ea)
 {
     return ea.to_string();
 }
@@ -452,12 +458,17 @@ std::string serialize(const std::vector<API::Peerinfo>& connected)
     json j = json::array();
     for (auto& item : connected) {
         json elem;
-        elem["connection"] = json {
-            { "ip", item.endpoint.ip().to_string().c_str() },
+        auto conn = json {
             { "port", item.endpoint.port() },
             { "sinceTimestamp", item.since },
             { "sinceUtc", format_utc(item.since) }
         };
+        if (auto ip { item.endpoint.ip() }; ip.has_value())
+            conn["ip"] = ip->to_string();
+        else
+            conn["ip"] = nullptr;
+        elem["connection"] = conn;
+
         elem["leaderPriority"] = json {
             { "ack", json { { "importance", item.acknowledgedSnapshotPriority.importance }, { "height", item.acknowledgedSnapshotPriority.height } } },
             { "theirs", json { { "importance", item.theirSnapshotPriority.importance }, { "height", item.theirSnapshotPriority.height } } }

@@ -116,20 +116,20 @@ public:
     void start_timer(StartTimer);
     void cancel_timer(const Timer::key_t&);
     void async_mempool_update(mempool::Log&& s);
-    void async_report_failed_outbound(TCPSockaddr);
     void shutdown(int32_t reason);
     void wait_for_shutdown();
     void async_stage_action(stage_operation::Result);
     void async_state_update(StateUpdate&& s);
     void notify_closed_rtc(std::shared_ptr<RTCConnection> rtc);
 
-    void erase(std::shared_ptr<ConnectionBase> c);
+    void erase(std::shared_ptr<ConnectionBase> c, Error);
     void on_failed_connect(const ConnectRequest& r, Error reason);
+    void on_outbound_closed(std::shared_ptr<ConnectionBase>, int32_t reason);
 
     void start();
 
 private:
-    std::vector<TCPSockaddr> get_db_peers(size_t num);
+    std::vector<TCPPeeraddr> get_db_peers(size_t num);
     //////////////////////////////
     // Important event loop functions
     void loop();
@@ -145,7 +145,7 @@ private:
 
     //////////////////////////////
     // Connection related functions
-    void erase_internal(Conref cr);
+    void erase_internal(Conref cr, Error);
     [[nodiscard]] bool insert(Conref cr, const InitMsg& data); // returns true if requests might be possbile
     void close(Conref cr, Error reason);
     void close_by_id(uint64_t connectionId, int32_t reason);
@@ -188,6 +188,7 @@ private:
     ////////////////////////
     // convenience functions
     void consider_send_snapshot(Conref);
+    void on_received_addresses(Conref cr, const messages::Vector16<TCPPeeraddr>&);
 
     void send_schedule_signaling_lists();
 
@@ -246,7 +247,9 @@ private:
     // event types
     struct Erase {
         std::shared_ptr<ConnectionBase> c;
+        Error reason;
     };
+    using OutboundClosed = AddressManager::OutboundClosedEvent;
     struct RegisterConnection {
         ConnectionBase::ConnectionVariant convar;
     };
@@ -279,7 +282,7 @@ private:
     };
 
     // event queue
-    using Event = std::variant<Erase, RegisterConnection, OnProcessConnection,
+    using Event = std::variant<Erase, OutboundClosed, RegisterConnection, OnProcessConnection,
         StateUpdate, SignedSnapshotCb, PeersCb, SyncedCb, stage_operation::Result,
         OnForwardBlockrep, InspectorCb, GetHashrate, GetHashrateChart,
         FailedConnect,
@@ -291,6 +294,7 @@ public:
 private:
     // event handlers
     void handle_event(Erase&&);
+    void handle_event(OutboundClosed&&);
     void handle_event(RegisterConnection&&);
     void handle_event(OnProcessConnection&&);
     void handle_event(StateUpdate&&);

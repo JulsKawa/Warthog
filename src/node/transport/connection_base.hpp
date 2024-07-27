@@ -19,7 +19,7 @@ class RTCConnection;
 namespace uvw {
 class timer_handle;
 }
-struct Sockaddr;
+struct Peeraddr;
 
 struct HandshakeState {
 
@@ -99,7 +99,7 @@ public:
 
     // can be called from all threads
     auto created_at() const { return createdAtSystem; }
-    [[nodiscard]] virtual bool is_native() const { return false; }
+    [[nodiscard]] virtual bool is_tcp() const { return false; }
     std::string to_string() const;
     std::string_view type_str() const;
     uint32_t created_at_timestmap() const { return std::chrono::duration_cast<std::chrono::seconds>(createdAtSystem.time_since_epoch()).count(); }
@@ -146,9 +146,8 @@ public:
     const std::chrono::system_clock::time_point createdAtSystem;
 };
 
-class IPv4Connection : public ConnectionBase {
+class AuthenticatableConnection : public ConnectionBase {
 public:
     using ConnectionBase::ConnectionBase;
-    virtual IPv4 peer_ipv4() const = 0;
     virtual void start_read() = 0;
 };

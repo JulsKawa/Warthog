@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "browser.hpp"
 #include "cmdline/cmdline.hpp"
 #include "general/errors.hpp"
 #include "general/is_testnet.hpp"
@@ -148,9 +149,9 @@ template <typename T>
     throw std::runtime_error("Cannot extract configuration value starting at line "s + std::to_string(n.source().begin.line) + ", colum "s + std::to_string(n.source().begin.column) + ".");
 }
 
-TCPSockaddr fetch_endpointaddress(toml::node& n)
+TCPPeeraddr fetch_endpointaddress(toml::node& n)
 {
-    auto p = TCPSockaddr::parse(fetch<std::string>(n));
+    auto p = TCPPeeraddr::parse(fetch<std::string>(n));
     if (p) {
         return p.value();
     }
@@ -165,13 +166,13 @@ toml::array& array_ref(toml::node& n)
 }
 EndpointVector parse_endpoints(std::string csv)
 {
-    std::vector<TCPSockaddr> out;
+    std::vector<TCPPeeraddr> out;
 #ifndef DISABLE_LIBUV
     std::string::size_type pos = 0;
     while (true) {
         auto end = csv.find(",", pos);
         auto param = csv.substr(pos, end - pos);
-        auto parsed = TCPSockaddr::parse(param);
+        auto parsed = TCPPeeraddr::parse(param);
         if (!parsed) {
             throw std::runtime_error("Invalid parameter '"s + param + "'."s);
         }
@@ -209,18 +210,19 @@ int ConfigParams::init(const gengetopt_args_info& ai)
         }
     }
     // copy default values
-    std::optional<TCPSockaddr> nodeBind;
-    std::optional<TCPSockaddr> rpcBind;
-    std::optional<TCPSockaddr> publicrpcBind;
-    std::optional<TCPSockaddr> stratumBind;
+    std::optional<TCPPeeraddr> nodeBind;
+    std::optional<TCPPeeraddr> rpcBind;
+    std::optional<TCPPeeraddr> publicrpcBind;
+    std::optional<TCPPeeraddr> stratumBind;
     node.isolated = ai.isolated_given;
     if (ai.testnet_given) {
         enable_testnet();
     }
     if (ai.enable_public_given) {
-        publicrpcBind = TCPSockaddr("0.0.0.0:3001");
+        publicrpcBind = TCPPeeraddr("0.0.0.0:3001");
     }
 
+#ifndef DISABLE_LIBUV
     if (is_testnet()) {
         peers.connect = EndpointVector {
             "193.218.118.57:9286",
@@ -228,18 +230,31 @@ int ConfigParams::init(const gengetopt_args_info& ai)
         };
     } else {
         peers.connect = EndpointVector {
+            "122.148.197.165:9186",
+            "135.181.77.214:9186",
+            "167.114.1.208:9186",
+            "185.209.228.16:9186",
+            "185.215.180.7:9186",
             "193.218.118.57:9186",
-            "96.41.20.26:9186",
-            "89.163.224.253:9186",
-            "88.11.56.103:9186",
+            "194.164.30.182:9186",
+            "203.25.209.147:9186",
+            "209.12.214.158:9186",
+            "213.199.59.252:20016",
+            "47.187.202.183:9186",
+            "49.13.161.201:9186",
+            "51.75.21.134:9186",
+            "62.72.44.89:9186",
+            "63.231.144.31:9186",
+            "74.208.75.230:9186",
+            "74.208.77.165:9186",
             "81.163.20.40:9186",
-            "74.122.131.1:9186",
-            "68.227.255.200:9186",
-            "64.92.35.4:9186",
-            "37.114.63.165:9186",
-            "15.235.162.190:9186",
+            "82.146.46.246:9186",
+            "89.107.33.239:9186",
+            "89.117.150.162:9186",
+            "89.163.224.253:9186",
         };
     }
+#endif
 
     std::string filename = is_testnet() ? "testnet_config.toml" : "config.toml";
     if (!ai.config_given && !std::filesystem::exists(filename)) {
@@ -344,7 +359,7 @@ int ConfigParams::init(const gengetopt_args_info& ai)
         data.peersdb = ai.peers_db_arg;
     else {
         if (data.peersdb.empty()) {
-            data.peersdb = defaultDataDir + (is_testnet() ? "testnet_peers.db3" : "peers.db3");
+            data.peersdb = defaultDataDir + (is_testnet() ? "testnet_peers.db3" : "peers_v2.db3");
         }
     }
     if (ai.temporary_given)
@@ -352,7 +367,7 @@ int ConfigParams::init(const gengetopt_args_info& ai)
 
     // Stratum API socket
     if (ai.stratum_given) {
-        auto p = TCPSockaddr::parse(ai.stratum_arg);
+        auto p = TCPPeeraddr::parse(ai.stratum_arg);
         if (!p) {
             std::cerr << "Bad --stratum option '" << ai.rpc_arg << "'.\n";
             return -1;
@@ -366,7 +381,7 @@ int ConfigParams::init(const gengetopt_args_info& ai)
 
     // JSON RPC socket
     if (ai.rpc_given) {
-        auto p = TCPSockaddr::parse(ai.rpc_arg);
+        auto p = TCPPeeraddr::parse(ai.rpc_arg);
         if (!p) {
             std::cerr << "Bad --rpc option '" << ai.rpc_arg << "'.\n";
             return -1;
@@ -377,15 +392,15 @@ int ConfigParams::init(const gengetopt_args_info& ai)
             jsonrpc.bind = *rpcBind;
         } else {
             if (is_testnet())
-                jsonrpc.bind = TCPSockaddr::parse("127.0.0.1:3100").value();
+                jsonrpc.bind = TCPPeeraddr::parse("127.0.0.1:3100").value();
             else
-                jsonrpc.bind = TCPSockaddr::parse("127.0.0.1:3000").value();
+                jsonrpc.bind = TCPPeeraddr::parse("127.0.0.1:3000").value();
         }
     }
 
     // JSON Public RPC socket
     if (ai.publicrpc_given) {
-        auto p = TCPSockaddr::parse(ai.publicrpc_arg);
+        auto p = TCPPeeraddr::parse(ai.publicrpc_arg);
         if (!p) {
             std::cerr << "Bad --publicrpc option '" << ai.rpc_arg << "'.\n";
             return -1;
@@ -399,7 +414,7 @@ int ConfigParams::init(const gengetopt_args_info& ai)
 
     // Node socket
     if (ai.bind_given) {
-        auto p = TCPSockaddr::parse(ai.bind_arg);
+        auto p = TCPPeeraddr::parse(ai.bind_arg);
         if (!p) {
             std::cerr << "Bad --bind option '" << ai.bind_arg << "'.\n";
             return -1;
@@ -410,27 +425,48 @@ int ConfigParams::init(const gengetopt_args_info& ai)
             node.bind = *nodeBind;
         else {
             if (is_testnet())
-                node.bind = TCPSockaddr::parse("0.0.0.0:9286").value();
+                node.bind = TCPPeeraddr::parse("0.0.0.0:9286").value();
             else
-                node.bind = TCPSockaddr::parse("0.0.0.0:9186").value();
+                node.bind = TCPPeeraddr::parse("0.0.0.0:9186").value();
         }
     }
+#ifndef DISABLE_LIBUV
     if (ai.connect_given) {
         peers.connect = parse_endpoints(ai.connect_arg);
     }
+#else
+    auto wsPeers { ws_peers() };
+    spdlog::info("Websocket default peer list ({}):", wsPeers.size());
+
+    size_t i = 1;
+    for (auto& p : wsPeers) {
+        auto a { WSUrladdr::parse(p) };
+        if (a) {
+            spdlog::info("Adding websocket peer {}: {}", i, p);
+            peers.connect.push_back(*a);
+        } else {
+            spdlog::warn("Failed parsing Websocket peer {}: {}", i, p);
+        }
+        i += 1;
+    }
+#endif
 
     if (ai.ws_port_given) {
-        auto parse_port = [](int port) ->uint16_t{
+        auto parse_port = [](int port) -> uint16_t {
             if (port < 0 || port > std::numeric_limits<uint16_t>::max()) {
                 throw std::runtime_error("Invalid port '" + std::to_string(port) + "'");
             }
             return port;
         };
-        websocketServer.port = parse_port(ai.ws_port_arg) ;
-        if (ai.ws_tls_key_given) 
+        websocketServer.port = parse_port(ai.ws_port_arg);
+        if (ai.ws_tls_key_given)
             websocketServer.keyfile = ai.ws_tls_key_arg;
-        if (ai.ws_tls_cert_given) 
+        if (ai.ws_tls_cert_given)
             websocketServer.certfile = ai.ws_tls_cert_arg;
+        if (ai.ws_x_forwarded_for_given)
+            websocketServer.XFowarded = true;
+        if (ai.ws_bind_localhost_given)
+            websocketServer.bindLocalhost = true;
     }
 
     if (dmp) {
@@ -448,9 +484,11 @@ std::string ConfigParams::dump()
                                     });
 
     toml::array connect;
+#ifndef DISABLE_LIBUV
     for (auto ea : peers.connect) {
         connect.push_back(ea.to_string());
     }
+#endif
     tbl.insert_or_assign("stratum",
         toml::table {
             { "bind", stratumPool ? stratumPool->bind.to_string() : ""s },

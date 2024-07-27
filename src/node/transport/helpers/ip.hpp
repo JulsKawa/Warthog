@@ -5,6 +5,33 @@
 
 class IP {
 public:
+    class BanHandle {
+    public:
+        BanHandle(IPv4 ip)
+            : variant(ip)
+        {
+        }
+        BanHandle(IPv6::BanHandle32 v)
+            : variant(v)
+        {
+        }
+        BanHandle(IPv6::BanHandle48 v)
+            : variant(v)
+        {
+        }
+        auto visit(auto lambda) const
+        {
+            return std::visit(lambda, variant);
+        }
+        std::string to_string() const
+        {
+            return visit([](auto& handle) { return handle.to_string(); });
+        }
+
+    private:
+        using variant_t = std::variant<IPv4, IPv6::BanHandle32, IPv6::BanHandle48>;
+        variant_t variant;
+    };
     enum class type { v4,
         v6 };
     using variant_t = std::variant<IPv4, IPv6>;
@@ -34,6 +61,14 @@ public:
     auto operator<=>(const IP&) const = default;
     bool is_v6() const { return std::holds_alternative<IPv6>(data); }
     bool is_v4() const { return std::holds_alternative<IPv4>(data); }
+    const IPv4& get_v4() const
+    {
+        return std::get<IPv4>(data);
+    }
+    const IPv6& get_v6() const
+    {
+        return std::get<IPv6>(data);
+    }
     friend Writer& operator<<(Writer&, const IP&);
     size_t byte_size() const
     {
@@ -44,7 +79,7 @@ public:
         : data(ip) {};
     IP(IPv6 ip)
         : data(ip) {};
-    static std::optional<IP> parse(std::string_view s)
+    [[nodiscard]] static std::optional<IP> parse(std::string_view s)
     {
         if (auto ipv4 { IPv4::parse(s) })
             return IP { *ipv4 };

@@ -131,7 +131,26 @@ div.emscripten_border { border: 1px solid black; }
   </main>
 </div>
 
+    <script src="//cdn.jsdelivr.net/npm/eruda"></script>
+    <script>eruda.init();</script>
     <script type='text/javascript'>
+      // Create a reference for the Wake Lock.
+      let wakeLock = null;
+      const requestWakeLock = async () => {
+          try {
+              console.log("Trying to create wakeLock to prevent devices from dimming or locking the screen")
+              wakeLock = await navigator.wakeLock.request();
+              console.log("Created wakeLock successfully")
+              wakeLock.addEventListener('release', () => {
+                  console.log('Screen Wake Lock released:', wakeLock.released);
+              });
+              console.log('Screen Wake Lock released:', wakeLock.released);
+          } catch (err) {
+              console.log("Could not create wakeLock: ", err.message)
+          }
+      };
+      requestWakeLock();
+
       var statusElement = document.getElementById('status');
       var progressElement = document.getElementById('progress');
       var spinnerElement = document.getElementById('spinner');
@@ -201,8 +220,9 @@ div.emscripten_border { border: 1px solid black; }
                   elem.remove();
               }
           },
-          preRun: module => {
-              module.ENV.WS_PEERS = 'world';
+          preRun: module => { 
+//            list of websocket peers separated by semicolon
+              module.ENV.WS_PEERS = 'wss://node1.warthog.network/ws;wss://node2.warthog.network/ws';
           },
         print: (function() {
           var element = document.getElementById('output');

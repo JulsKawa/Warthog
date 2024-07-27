@@ -32,7 +32,6 @@ private:
     // Private methods
     [[nodiscard]] TCPConnection& insert_connection(std::shared_ptr<uvw::tcp_handle>& h, const TCPConnectRequest& r);
     void on_wakeup();
-    void connect_internal(const TCPConnectRequest&);
 
     // ip counting
     bool count(IPv4);
@@ -42,7 +41,7 @@ private:
 
 public:
     struct APIPeerdata {
-        TCPSockaddr address;
+        TCPPeeraddr address;
         uint32_t since;
     };
     using PeersCB = MoveOnlyFunction<void(std::vector<APIPeerdata>)>;
@@ -71,7 +70,7 @@ private:
         async_add_event(DeferFunc { std::move(cb) });
     }
 
-    const TCPSockaddr bindAddress;
+    const TCPPeeraddr bindAddress;
     //--------------------------------------
     // data accessed by libuv thread
     PerIpCounter perIpCounter;

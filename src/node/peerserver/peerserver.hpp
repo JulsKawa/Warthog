@@ -1,21 +1,11 @@
 #pragma once
-
 #include "ban_cache.hpp"
 #include "db/peer_db.hpp"
-#include "eventloop/address_manager/connection_schedule.hpp"
 #include "expected.hpp"
-#include "general/errors.hpp"
-#include "general/page.hpp"
-#include "spdlog/spdlog.h"
 #include "transport/connection_base.hpp"
-#include <bitset>
+#include "transport/helpers/transport_types.hpp"
 #include <condition_variable>
-#include <cstdint>
-#include <mutex>
-#include <queue>
-#include <set>
 #include <thread>
-#include <variant>
 
 struct Inspector;
 struct ConfigParams;
@@ -32,8 +22,15 @@ public:
 
 private:
     friend struct Inspector;
-    struct Authenticate {
-        std::shared_ptr<IPv4Connection> c;
+    struct LogOutboundIPv4 {
+        IPv4 ip;
+        std::shared_ptr<ConnectionBase> c;
+    };
+    struct AuthenticateInbound {
+        IP ip;
+        TransportType transportType;
+        // std::variant<std::shared_ptr<TCPConnection>, std::shared_ptr<WS
+        std::shared_ptr<AuthenticatableConnection> c;
     };
     struct Unban {
         result_callback_t cb;
@@ -47,8 +44,6 @@ private:
 public:
     bool async_register_close(std::shared_ptr<peerserver::ConnectionData> con, int32_t offense)
     {
-        // TODO:
-        // global().core->async_report_failed_outbound(peerAddress);
         if (offense == EREFUSED)
             return false;
         return async_event(OnClose { std::move(con), offense });
@@ -62,9 +57,13 @@ public:
     }
     void wait_for_shutdown();
 
-    bool authenticate(std::shared_ptr<IPv4Connection> c)
+    bool log_outbound(IPv4 ip, std::shared_ptr<ConnectionBase> c)
     {
-        return async_event(Authenticate { std::move(c) });
+        return async_event(LogOutboundIPv4 { std::move(ip), std::move(c) });
+    }
+    bool authenticate_inbound(IP ip, TransportType type, std::shared_ptr<AuthenticatableConnection> c)
+    {
+        return async_event(AuthenticateInbound { std::move(ip), type, std::move(c) });
     }
 
     bool async_get_banned(banned_callback_t cb)
@@ -79,16 +78,16 @@ public:
     {
         return async_event(GetOffenses { page, std::move(cb) });
     }
-    bool async_register_peer(TCPSockaddr a)
+    bool async_register_peer(TCPPeeraddr a)
     {
         return async_event(RegisterPeer { a });
     }
-    bool async_seen_peer(TCPSockaddr a)
+    bool async_seen_peer(TCPPeeraddr a)
     {
         return async_event(SeenPeer { a });
     }
     bool async_get_recent_peers(
-        std::function<void(std::vector<std::pair<TCPSockaddr, uint32_t>>&&)>&& cb,
+        std::function<void(std::vector<std::pair<TCPPeeraddr, Timestamp>>&&)>&& cb,
         size_t maxEntries = 100)
     {
         return async_event(GetRecentPeers { std::move(cb), maxEntries });
@@ -108,19 +107,19 @@ public:
 
 private:
     struct RegisterPeer {
-        TCPSockaddr a;
+        TCPPeeraddr a;
     };
     struct SeenPeer {
-        TCPSockaddr a;
+        TCPPeeraddr a;
     };
     struct GetRecentPeers {
-        std::function<void(std::vector<std::pair<TCPSockaddr, uint32_t>>&&)> cb;
+        std::function<void(std::vector<std::pair<TCPPeeraddr, Timestamp>>&&)> cb;
         size_t maxEntries;
     };
     struct Inspect {
         std::function<void(const PeerServer&)> cb;
     };
-    using Event = std::variant<OnClose, Authenticate, GetOffenses, Unban, banned_callback_t, RegisterPeer, SeenPeer, GetRecentPeers, Inspect>;
+    using Event = std::variant<OnClose, LogOutboundIPv4, AuthenticateInbound, GetOffenses, Unban, banned_callback_t, RegisterPeer, SeenPeer, GetRecentPeers, Inspect>;
     bool async_event(Event e)
     {
         std::unique_lock<std::mutex> l(mutex);
@@ -133,7 +132,6 @@ private:
     }
     void work();
     void accept_connection();
-    void register_close(IPv4 address, uint32_t now, int32_t offense, int64_t rowid);
     ////////////////
     //
     // private variables
@@ -143,15 +141,20 @@ private:
     void handle_event(OnClose&&);
     void handle_event(Unban&&);
     void handle_event(GetOffenses&&);
-    void handle_event(Authenticate&&);
+    void handle_event(AuthenticateInbound&&);
+    void handle_event(LogOutboundIPv4&&);
     void handle_event(banned_callback_t&&);
     void handle_event(RegisterPeer&&);
     void handle_event(SeenPeer&&);
     void handle_event(GetRecentPeers&&);
     void handle_event(Inspect&&);
 
-    void on_close(const OnClose&, const TCPSockaddr&);
-    void on_close(const OnClose&, const WebRTCSockaddr&);
+    void on_close(const OnClose&, const WebRTCPeeraddr&);
+#ifndef DISABLE_LIBUV
+    void on_close(const OnClose&, const Sockaddr&);
+#else
+    void on_close(const OnClose&, const WSUrladdr&);
+#endif
 
     ////////////////
     // Mutex protected variables

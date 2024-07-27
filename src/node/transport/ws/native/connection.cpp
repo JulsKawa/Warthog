@@ -1,5 +1,5 @@
 #include "connection.hpp"
-#include "transport/ws/native/conman.hpp"
+#include "transport/ws/native/ws_conman.hpp"
 
 WSConnection::WSConnection(CreationToken, std::weak_ptr<WSSession> handle, const WSConnectRequest& r, WSConnectionManager& conman)
     : session(handle)
@@ -24,10 +24,6 @@ uint16_t WSConnection::listen_port() const
     return conman.config.port;
 }
 
-std::optional<ConnectRequest> WSConnection::connect_request() const
-{
-    return connectRequest;
-}
 
 bool WSConnection::inbound() const{
     return connectRequest.inbound();

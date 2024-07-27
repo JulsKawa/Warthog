@@ -1,6 +1,5 @@
 #include "eventloop.hpp"
 #include "address_manager/address_manager_impl.hpp"
-#include "address_manager/connection_schedule.hpp"
 #include "api/realtime.hpp"
 #include "api/types/all.hpp"
 #include "block/chain/header_chain.hpp"
@@ -35,7 +34,11 @@ Eventloop::Eventloop(Token, PeerServer& ps, ChainServer& cs, const ConfigParams&
     : stateServer(cs)
     , chains(cs.get_chainstate())
     , mempool(false)
+#ifndef DISABLE_LIBUV
     , connections({ ps, config.peers.connect })
+#else
+    , connections({ ps, config.peers.connect })
+#endif
     , headerDownload(chains, consensus().total_work())
     , blockDownload(*this)
 {
@@ -97,9 +100,14 @@ void Eventloop::wait_for_shutdown()
         worker.join();
 }
 
-void Eventloop::erase(std::shared_ptr<ConnectionBase> c)
+void Eventloop::erase(std::shared_ptr<ConnectionBase> c, Error reason)
 {
-    defer(Erase { std::move(c) });
+    defer(Erase { std::move(c), reason });
+}
+
+void Eventloop::on_outbound_closed(std::shared_ptr<ConnectionBase> c, int32_t reason)
+{
+    defer(OutboundClosed { std::move(c), reason });
 }
 
 void Eventloop::async_state_update(StateUpdate&& s)
@@ -236,7 +244,7 @@ bool Eventloop::check_shutdown()
     for (auto cr : connections.all()) {
         if (cr->erased())
             continue;
-        erase_internal(cr);
+        erase_internal(cr, Error(closeReason));
     }
     return true;
 }
@@ -246,7 +254,12 @@ void Eventloop::handle_event(Erase&& m)
     bool erased { m.c->eventloop_erased };
     bool registered { m.c->eventloop_registered };
     if ((!erased) && registered)
-        erase_internal(m.c->dataiter);
+        erase_internal(m.c->dataiter, m.reason);
+}
+
+void Eventloop::handle_event(OutboundClosed&& e)
+{
+    connections.outbound_closed(std::move(e));
 }
 
 void Eventloop::handle_event(RegisterConnection&& m)
@@ -449,9 +462,8 @@ void Eventloop::handle_event(GetHashrateChart&& e)
 }
 void Eventloop::handle_event(FailedConnect&& e)
 {
-    spdlog::warn("Cannot connect to {}: ", e.connectRequest.address.to_string(), Error(e.reason).err_name());
+    spdlog::warn("Cannot connect to {}: {}", e.connectRequest.address().to_string(), Error(e.reason).err_name());
     connections.outbound_failed(e.connectRequest);
-    // TODO
 }
 
 void Eventloop::handle_event(mempool::Log&& log)
@@ -611,7 +623,7 @@ void Eventloop::handle_event(GeneratedVerificationSdpOffer&& m)
         return;
     }
     auto& c { o.value() };
-    const auto& verifyIp { rtcCon.peer_addr().ip() };
+    const auto& verifyIp { rtcCon.native_peer_addr().ip };
 
     auto ips { IdentityIps::from_sdp(m.sdp) };
 
@@ -650,7 +662,7 @@ void Eventloop::handle_event(GeneratedSdpOffer&& m)
     }
 }
 
-void Eventloop::erase_internal(Conref c)
+void Eventloop::erase_internal(Conref c, Error error)
 {
     if (c->c->eventloop_erased)
         return;
@@ -663,9 +675,8 @@ void Eventloop::erase_internal(Conref c)
         timer.cancel(c.job().timer());
     }
     if (headerDownload.erase(c) && !closeReason) {
+        spdlog::info("Connected to {} peers (closed connection to {}, reason: {})", headerDownload.size(), c.peer().to_string(), Error(error).err_name());
         realtime_api::on_disconnect(headerDownload.size(), c.id());
-        // TODO: add log
-        // spdlog::info("Connected to {} peers (closed connection to {}, reason: {})", headerDownload.size(), c->c->peer_endpoint().to_string(), Error(error).err_name());
     }
     if (blockDownload.erase(c))
         coordinate_sync();
@@ -701,7 +712,7 @@ void Eventloop::close(Conref cr, Error reason)
     if (!cr->c->eventloop_registered)
         return;
     cr->c->close(reason);
-    erase_internal(cr); // do not consider this connection anymore
+    erase_internal(cr, reason); // do not consider this connection anymore
 }
 
 void Eventloop::close_by_id(uint64_t conId, int32_t reason)
@@ -763,13 +774,20 @@ void Eventloop::send_ping_await_pong(Conref c)
     auto t = timer.insert(
         (config().localDebug ? 10min : 1min),
         Timer::CloseNoPong { c.id() });
+
+    uint16_t maxTCPAddressess { 0 };
+#ifndef DISABLE_LIBUV
+    if (c.is_tcp())
+        maxTCPAddressess = 5; // only accept TCP addresses from TCP peers and only if we are TCP node ourselves
+#endif
+
     if (c.version().v1()) {
-        PingMsg p(signed_snapshot() ? signed_snapshot()->priority : SignedSnapshot::Priority {});
+        PingMsg p(signed_snapshot() ? signed_snapshot()->priority : SignedSnapshot::Priority {}, maxTCPAddressess);
         c.ping().await_pong(p, t);
         c.send(p);
     } else {
         PingV2Msg p(signed_snapshot() ? signed_snapshot()->priority : SignedSnapshot::Priority {},
-            { .ndiscard = c.rtc().our.pendingOutgoing.schedule_discard() });
+            { .maxAddresses = maxTCPAddressess, .ndiscard = c.rtc().our.pendingOutgoing.schedule_discard() });
         c.ping().await_pong_v2({ .extraData { c.rtc().our.signalingList.offset_scheduled() },
                                    .msg = std::move(p) },
             t);
@@ -963,15 +981,17 @@ void Eventloop::handle_msg(Conref c, ForkMsg&& m)
 void Eventloop::handle_msg(Conref c, PingMsg&& m)
 {
     log_communication("{} handle ping", c.str());
-    size_t nAddr { std::min(uint16_t(20), m.maxAddresses()) };
-    auto addresses = connections.sample_verified(nAddr);
     c->ratelimit.ping();
 #ifndef DISABLE_LIBUV // TODO: replace TCPSockaddr by something else for emscrpiten build (no TCP connections available in browsers)
+    size_t nAddr { std::min(uint16_t(20), m.maxAddresses()) };
+    if (!c.is_tcp())
+        nAddr = 0;
+    auto addresses { connections.sample_verified_tcp(nAddr) };
     PongMsg msg { m.nonce(), std::move(addresses), mempool.sample(m.maxTransactions()) };
-#else
-    PongMsg msg(m.nonce(), std::move(addresses), {});
-#endif
     spdlog::debug("{} Sending {} addresses", c.str(), msg.addresses().size());
+#else
+    PongMsg msg(m.nonce(), {}, {});
+#endif
     if (c->theirSnapshotPriority < m.sp())
         c->theirSnapshotPriority = m.sp();
     c.send(msg);
@@ -982,13 +1002,15 @@ void Eventloop::handle_msg(Conref c, PingV2Msg&& m)
 {
 
     log_communication("{} handle ping", c.str());
-    size_t nAddr { std::min(uint16_t(20), m.maxAddresses()) };
-    auto addresses = connections.sample_verified(nAddr);
     c->ratelimit.ping();
 #ifndef DISABLE_LIBUV // TODO: replace TCPSockaddr by something else for emscrpiten build (no TCP connections available in browsers)
+    size_t nAddr { std::min(uint16_t(20), m.maxAddresses()) };
+    if (!c.is_tcp())
+        nAddr = 0;
+    auto addresses = connections.sample_verified_tcp(nAddr);
     PongV2Msg msg { m.nonce(), std::move(addresses), mempool.sample(m.maxTransactions()) };
 #else
-    PongV2Msg msg(m.nonce(), std::move(addresses), {});
+    PongV2Msg msg(m.nonce(), {}, {});
 #endif
     spdlog::debug("{} Sending {} addresses", c.str(), msg.addresses().size());
     if (c->theirSnapshotPriority < m.sp())
@@ -998,13 +1020,23 @@ void Eventloop::handle_msg(Conref c, PingV2Msg&& m)
     c.rtc().their.forwardRequests.discard(m.discarded_forward_requests());
 };
 
+void Eventloop::on_received_addresses(Conref cr, const messages::Vector16<TCPPeeraddr>& addresses){
+    // only process received addresses when we are a native node (not browser nodes)
+#ifndef DISABLE_LIBUV 
+    if (auto ip{cr.peer().ip()}; ip.has_value() && cr.is_tcp()) {
+        spdlog::debug("{} Received {} addresses", cr.str(), addresses.size());
+        if (ip->is_v4()) 
+            connections.verify(addresses, ip->get_v4());
+    }
+#endif
+}
+
 void Eventloop::handle_msg(Conref cr, PongMsg&& m)
 {
     log_communication("{} handle pong", cr.str());
     auto& pingMsg = cr.ping().check(m);
+    on_received_addresses(cr,m.addresses());
     received_pong_sleep_ping(cr);
-    spdlog::debug("{} Received {} addresses", cr.str(), m.addresses().size());
-    // connections.verify(m.addresses,cr.);
     spdlog::debug("{} Got {} transaction Ids in pong message", cr.str(), m.txids().size());
 
     // update acknowledged priority
@@ -1023,9 +1055,8 @@ void Eventloop::handle_msg(Conref cr, PongV2Msg&& m)
     log_communication("{} handle pong", cr.str());
     auto& pingData = cr.ping().check(m);
     auto& pingMsg = pingData.msg;
+    on_received_addresses(cr,m.addresses());
     received_pong_sleep_ping(cr);
-    spdlog::debug("{} Received {} addresses", cr.str(), m.addresses().size());
-    // connections.verify(m.addresses,cr.);
     spdlog::debug("{} Got {} transaction Ids in pong message", cr.str(), m.txids().size());
 
     // update acknowledged priority
@@ -1488,12 +1519,14 @@ tl::expected<Conref, int32_t> Eventloop::try_register(RegisterConnection&& m)
     c->eventloop_registered = true;
 
     if (m.convar.is_rtc()) {
+        auto& c { m.convar.get_rtc() };
         auto& conId { m.convar.get_rtc()->verification_con_id() };
         if (conId != 0) { // conId id verified in this RTC connection
             if (auto o { connections.find(conId) }) {
+                auto ip { c->native_peer_addr().ip };
                 auto& parent = *o;
-                parent.rtc().their.identity.set_verified(c->peer_addr().ip());
-                spdlog::info("verified RTC ip {} for {}", c->peer_addr().ip().to_string(), parent.peer().to_string());
+                parent.rtc().their.identity.set_verified(ip);
+                spdlog::info("verified RTC ip {} for {}", ip.to_string(), parent.peer().to_string());
             }
             conId = 0;
             return tl::make_unexpected(ERTCFEELER);

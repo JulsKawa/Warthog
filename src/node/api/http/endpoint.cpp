@@ -46,7 +46,7 @@ struct ParameterParser {
     }
     operator Funds()
     {
-        return Funds::throw_parse(sv);
+        return Funds::parse_throw(sv);
     }
     operator Page()
     {
@@ -190,7 +190,7 @@ std::optional<HTTPEndpoint> HTTPEndpoint::make_public_endpoint(const ConfigParam
     return std::optional<HTTPEndpoint> { std::in_place, pAPI->bind, true };
 };
 
-HTTPEndpoint::HTTPEndpoint(TCPSockaddr bind, bool isPublic)
+HTTPEndpoint::HTTPEndpoint(TCPPeeraddr bind, bool isPublic)
     : bind(bind)
     , isPublic(isPublic)
     , app(lc.loop)
