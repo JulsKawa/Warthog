@@ -1,10 +1,10 @@
 name: Pre-Release
 
 on:
-    workflow_dispatch:
-    workflow_call:
-    repository_dispatch:
-      types: [pre-release]
+  workflow_dispatch:
+  workflow_call:
+  repository_dispatch:
+    types: [pre-release]
       
 jobs:
   build:
